@@ -20,7 +20,8 @@ sudo /root/install-opencode-litellm.sh
   - `/etc/hosts` solo si indicas una IP manual de fallback
 - Expone el comando `opencode` en `/usr/local/bin/opencode`.
 - Crea el alias `opencode-yolo` para ejecutar `opencode --dangerously-skip-permissions`.
-- Crea y habilita el servicio systemd:
+- Crea el alias `opencode-web` para ejecutar `opencode web --hostname 0.0.0.0 --port 4000`.
+- Pregunta si quieres crear y habilitar el servicio systemd persistente:
   - `opencode-web.service`
 
 ## Requisitos

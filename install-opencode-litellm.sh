@@ -209,6 +209,13 @@ exec opencode --dangerously-skip-permissions "$@"
 EOF_YOLO
   chmod +x /usr/local/bin/opencode-yolo
   echo "[OK] Alias YOLO disponible en /usr/local/bin/opencode-yolo"
+
+  cat > /usr/local/bin/opencode-web <<'EOF_WEB'
+#!/usr/bin/env bash
+exec opencode web --hostname 0.0.0.0 --port "${OPENCODE_WEB_PORT:-4000}" "$@"
+EOF_WEB
+  chmod +x /usr/local/bin/opencode-web
+  echo "[OK] Alias web disponible en /usr/local/bin/opencode-web"
 }
 
 parse_base_url() {
@@ -263,16 +270,18 @@ main() {
   fi
   expose_opencode_command
 
-  read_input "[1/5] Base URL de LiteLLM [http://lllm.cpd.local/v1]: " LITELLM_BASE_URL
+  read_input "[1/6] Base URL de LiteLLM [http://lllm.cpd.local/v1]: " LITELLM_BASE_URL
   LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local/v1}"
   parse_base_url "$LITELLM_BASE_URL"
 
-  read_input "[2/5] IP opcional para forzar ${LITELLM_HOST} en /etc/hosts (normalmente vacío): " LITELLM_IP
-  read_input "[3/5] Puerto donde publicar opencode web [4000]: " OPENCODE_PORT
+  read_input "[2/6] IP opcional para forzar ${LITELLM_HOST} en /etc/hosts (normalmente vacío): " LITELLM_IP
+  read_input "[3/6] Puerto donde publicar opencode web [4000]: " OPENCODE_PORT
   OPENCODE_PORT="${OPENCODE_PORT:-4000}"
-  read_input "[4/5] Dominio a usar en la config [${LITELLM_HOST}]: " LITELLM_DOMAIN
+  read_input "[4/6] Dominio a usar en la config [${LITELLM_HOST}]: " LITELLM_DOMAIN
   LITELLM_DOMAIN="${LITELLM_DOMAIN:-$LITELLM_HOST}"
-  read_secret "[5/5] API Key de LiteLLM: " API_KEY
+  read_input "[5/6] Levantar opencode web como servicio persistente? [S/n]: " INSTALL_SERVICE
+  INSTALL_SERVICE="${INSTALL_SERVICE:-s}"
+  read_secret "[6/6] API Key de LiteLLM: " API_KEY
 
   if [[ -z "$API_KEY" ]]; then
     echo "[ERROR] La clave API no puede quedar vacía."
@@ -367,8 +376,10 @@ main() {
     }' > "$JSON_CONF"
   cp "$JSON_CONF" "$JSONC_CONF"
 
-  echo "[INFO] Generando servicio systemd: $SERVICE_PATH"
-  cat > "$SERVICE_PATH" <<EOF_SERVICE
+  SERVICE_SUMMARY="no configurado"
+  if [[ "$INSTALL_SERVICE" =~ ^([sS]|[sS][iI]|[yY]|[yY][eE][sS])$ ]]; then
+    echo "[INFO] Generando servicio systemd: $SERVICE_PATH"
+    cat > "$SERVICE_PATH" <<EOF_SERVICE
 [Unit]
 Description=opencode web
 After=network-online.target
@@ -390,26 +401,35 @@ StartLimitInterval=0
 WantedBy=multi-user.target
 EOF_SERVICE
 
-  systemctl daemon-reload
-  systemctl enable --now "$SERVICE_NAME"
+    systemctl daemon-reload
+    systemctl enable --now "$SERVICE_NAME"
 
-  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    echo "[ERROR] El servicio no quedó activo. Revisa: journalctl -u $SERVICE_NAME -n 60"
-    exit 1
-  fi
+    if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+      echo "[ERROR] El servicio no quedó activo. Revisa: journalctl -u $SERVICE_NAME -n 60"
+      exit 1
+    fi
 
-  if ! curl -sS --max-time 10 "http://127.0.0.1:$OPENCODE_PORT/ui/" >/dev/null; then
-    echo "[ADVERTENCIA] El servicio está activo, pero no respondió en http://127.0.0.1:$OPENCODE_PORT/ui/."
+    if ! curl -sS --max-time 10 "http://127.0.0.1:$OPENCODE_PORT/ui/" >/dev/null; then
+      echo "[ADVERTENCIA] El servicio está activo, pero no respondió en http://127.0.0.1:$OPENCODE_PORT/ui/."
+    else
+      echo "[OK] opencode web responde en http://127.0.0.1:$OPENCODE_PORT/ui/"
+    fi
+    SERVICE_SUMMARY="$SERVICE_NAME activo"
   else
-    echo "[OK] opencode web responde en http://127.0.0.1:$OPENCODE_PORT/ui/"
+    if systemctl list-unit-files "$SERVICE_NAME" --no-legend 2>/dev/null | grep -q "^$SERVICE_NAME"; then
+      systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+      systemctl daemon-reload
+    fi
+    echo "[INFO] Servicio persistente omitido. Puedes levantarlo manualmente con: opencode-web"
   fi
 
   echo
   printf '[FINAL] Instalado y activo con:\n'
   printf '  - Config: %s\n  - Configc: %s\n' "$JSON_CONF" "$JSONC_CONF"
-  printf '  - Servicio: %s\n' "$SERVICE_NAME"
+  printf '  - Servicio: %s\n' "$SERVICE_SUMMARY"
   printf '  - Comando opencode: %s\n' "$OPENCODE_CMD"
   printf '  - Comando YOLO: %s\n' "/usr/local/bin/opencode-yolo"
+  printf '  - Comando web: %s\n' "/usr/local/bin/opencode-web"
   printf '  - URL base: %s\n' "http://$LITELLM_DOMAIN:$OPENCODE_PORT/ui/"
   printf '  - API usada: %s\n' "$API_BASE_URL"
   printf '  - Modelo por defecto: litellm/%s\n' "$DEFAULT_MODEL"
