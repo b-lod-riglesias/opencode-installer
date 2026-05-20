@@ -147,7 +147,11 @@ parse_base_url() {
   fi
 
   if [[ -z "$LITELLM_PORT" ]]; then
-    LITELLM_PORT="4000"
+    if [[ "$SCHEME" == "https" ]]; then
+      LITELLM_PORT="443"
+    else
+      LITELLM_PORT="80"
+    fi
   fi
 }
 
@@ -168,11 +172,12 @@ main() {
     fi
   fi
 
-  read_input "[1/5] Base URL de LiteLLM (ej: http://lllm.cpd.local:4000/v1): " LITELLM_BASE_URL
-  LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local:4000/v1}"
+  read_input "[1/5] Base URL de LiteLLM [http://lllm.cpd.local/v1]: " LITELLM_BASE_URL
+  LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local/v1}"
   parse_base_url "$LITELLM_BASE_URL"
 
-  read_input "[2/5] IP (opcional) para mapear ${LITELLM_HOST} en /etc/hosts: " LITELLM_IP
+  read_input "[2/5] IP (opcional) para mapear ${LITELLM_HOST} en /etc/hosts [10.20.20.174]: " LITELLM_IP
+  LITELLM_IP="${LITELLM_IP:-10.20.20.174}"
   read_input "[3/5] Puerto donde publicar opencode web [4000]: " OPENCODE_PORT
   OPENCODE_PORT="${OPENCODE_PORT:-4000}"
   read_input "[4/5] Dominio a usar en la config [${LITELLM_HOST}]: " LITELLM_DOMAIN
@@ -199,7 +204,13 @@ main() {
     echo "[INFO] Si el DNS falla, lanza el script otra vez y proporciona la IP."
   fi
 
-  API_BASE_URL="$SCHEME://$LITELLM_DOMAIN:$LITELLM_PORT/v1"
+  if [[ "$SCHEME" == "http" && "$LITELLM_PORT" == "80" ]]; then
+    API_BASE_URL="$SCHEME://$LITELLM_DOMAIN/v1"
+  elif [[ "$SCHEME" == "https" && "$LITELLM_PORT" == "443" ]]; then
+    API_BASE_URL="$SCHEME://$LITELLM_DOMAIN/v1"
+  else
+    API_BASE_URL="$SCHEME://$LITELLM_DOMAIN:$LITELLM_PORT/v1"
+  fi
   MODELS_URL="$API_BASE_URL/models"
 
   echo "[CHECK] Probando conectividad y clave API contra $MODELS_URL ..."
