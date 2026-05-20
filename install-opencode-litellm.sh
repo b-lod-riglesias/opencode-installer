@@ -183,6 +183,27 @@ install_opencode() {
   echo "[OK] opencode instalado en $OPENCODE_BIN"
 }
 
+expose_opencode_command() {
+  if [[ ! -x "$OPENCODE_BIN" ]]; then
+    echo "[ERROR] opencode no es ejecutable en $OPENCODE_BIN"
+    exit 1
+  fi
+
+  if [[ "$OPENCODE_BIN" != "/usr/local/bin/opencode" ]]; then
+    ln -sf "$OPENCODE_BIN" /usr/local/bin/opencode
+  fi
+
+  if ! command -v opencode >/dev/null 2>&1; then
+    echo "[ERROR] No pude dejar opencode disponible en PATH."
+    echo "        Binario detectado: $OPENCODE_BIN"
+    echo "        Enlace esperado: /usr/local/bin/opencode"
+    exit 1
+  fi
+
+  OPENCODE_CMD="$(command -v opencode)"
+  echo "[OK] Comando opencode disponible en $OPENCODE_CMD"
+}
+
 parse_base_url() {
   local base="$1"
   BASE_URL_RAW="$base"
@@ -233,6 +254,7 @@ main() {
       install_opencode
     fi
   fi
+  expose_opencode_command
 
   read_input "[1/5] Base URL de LiteLLM [http://lllm.cpd.local/v1]: " LITELLM_BASE_URL
   LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local/v1}"
@@ -379,9 +401,11 @@ EOF_SERVICE
   printf '[FINAL] Instalado y activo con:\n'
   printf '  - Config: %s\n  - Configc: %s\n' "$JSON_CONF" "$JSONC_CONF"
   printf '  - Servicio: %s\n' "$SERVICE_NAME"
+  printf '  - Comando opencode: %s\n' "$OPENCODE_CMD"
   printf '  - URL base: %s\n' "http://$LITELLM_DOMAIN:$OPENCODE_PORT/ui/"
   printf '  - API usada: %s\n' "$API_BASE_URL"
   printf '  - Modelo por defecto: litellm/%s\n' "$DEFAULT_MODEL"
+  printf '  - Recarga shell si tu terminal cacheo comandos: hash -r\n'
   echo
 }
 
