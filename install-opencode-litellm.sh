@@ -7,150 +7,253 @@ JSON_CONF="$CONFIG_DIR/opencode.json"
 JSONC_CONF="$CONFIG_DIR/opencode.jsonc"
 SERVICE_NAME="opencode-web.service"
 SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
+TTY_IN="${TTY:-/dev/tty}"
 
 need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] Falta dependencia: $1"; exit 1; }
+  command -v "$1" >/dev/null 2>&1
 }
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "[ERROR] Ejecuta este script como root (o con sudo)."
-  exit 1
-fi
-
-need_cmd curl
-need_cmd jq
-need_cmd systemctl
-
-if [[ ! -x "$OPENCODE_BIN" ]]; then
-  if command -v opencode >/dev/null 2>&1; then
-    OPENCODE_BIN="$(command -v opencode)"
-  else
-    echo "[ERROR] No encuentro opencode. Ajusta OPENCODE_BIN o instala opencode antes."
+ensure_root() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "[ERROR] Ejecuta este script como root (o con sudo)."
     exit 1
   fi
-fi
+}
 
-read -r -p "[1/6] IP o host de LiteLLM (por defecto lllm.cpd.local): " LITELLM_HOST
-LITELLM_HOST="${LITELLM_HOST:-lllm.cpd.local}"
-
-read -r -p "[2/6] IP que resolverá ese host (si es DNS, deja igual): " LITELLM_IP
-if [[ -z "$LITELLM_IP" ]]; then
-  # Intento mantener lo que ya exista en /etc/hosts para el mismo host
-  if getent hosts "$LITELLM_HOST" >/dev/null 2>&1; then
-    LITELLM_IP="$(getent hosts "$LITELLM_HOST" | awk '{print $1}' | head -n 1)"
-  else
-    LITELLM_IP="10.20.20.56"
+need_tty() {
+  if [[ ! -r "$TTY_IN" || ! -w "$TTY_IN" ]]; then
+    echo "[ERROR] Este instalador necesita entrada interactiva (TTY) para pedir Base URL y API key."
+    exit 1
   fi
-fi
+}
 
-read -r -p "[3/6] Puerto de LiteLLM [4000]: " LITELLM_PORT
-LITELLM_PORT="${LITELLM_PORT:-4000}"
+read_input() {
+  local prompt="$1"
+  local varname="$2"
+  local value=""
+  IFS= read -r -p "$prompt" value < "$TTY_IN"
+  printf -v "$varname" '%s' "$value"
+}
 
-read -r -p "[4/6] Puerto donde quieres publicar opencode web [4000]: " OPENCODE_PORT
-OPENCODE_PORT="${OPENCODE_PORT:-4000}"
+read_secret() {
+  local prompt="$1"
+  local varname="$2"
+  local value=""
+  IFS= read -r -s -p "$prompt" value < "$TTY_IN"
+  echo
+  printf -v "$varname" '%s' "$value"
+}
 
-read -r -p "[5/6] Dominio opcional que quieras usar en config (por defecto lllm.cpd.local): " LITELLM_DOMAIN
-LITELLM_DOMAIN="${LITELLM_DOMAIN:-lllm.cpd.local}"
+install_dependency() {
+  local dep="$1"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y && apt-get install -y "$dep"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y "$dep"
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "$dep"
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Syu --noconfirm "$dep"
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "$dep"
+  else
+    echo "[ERROR] No hay gestor de paquetes compatible para instalar '$dep'."
+    exit 1
+  fi
+}
 
-read -r -s -p "[6/6] API Key de LiteLLM: " API_KEY
-echo
+ensure_dependency() {
+  local dep="$1"
+  if need_cmd "$dep"; then
+    return
+  fi
 
-if [[ -z "$API_KEY" ]]; then
-  echo "[ERROR] La clave API no puede quedar vacía."
+  echo "[WARN] Falta dependencia: $dep"
+  if [[ "$dep" == "curl" || "$dep" == "jq" || "$dep" == "systemctl" ]]; then
+    echo "[INFO] Intentando instalar $dep..."
+    install_dependency "$dep"
+    if need_cmd "$dep"; then
+      echo "[OK] Dependencia instalada: $dep"
+      return
+    fi
+  fi
+
+  echo "[ERROR] No pude instalar '$dep'. Instálala y vuelve a ejecutar."
   exit 1
-fi
+}
 
-BASE_URL="http://$LITELLM_HOST:$LITELLM_PORT/v1"
-MODELS_URL="$BASE_URL/models"
+check_cpu() {
+  local os
+  local cpu
+  os="$(uname -s)"
+  cpu="$(uname -m)"
 
-if [[ "$LITELLM_HOST" != "$LITELLM_DOMAIN" ]]; then
-  echo "[INFO] Se usará el host para tests y config como '$LITELLM_DOMAIN'."
-  BASE_URL="http://$LITELLM_DOMAIN:$LITELLM_PORT/v1"
-fi
-MODELS_URL="http://$LITELLM_DOMAIN:$LITELLM_PORT/v1/models"
+  if [[ "$os" != "Linux" ]]; then
+    echo "[ERROR] Instalador soportado solo en Linux. Detectado: $os"
+    exit 1
+  fi
 
-if [[ "$LITELLM_IP" != "127.0.0.1" && "$LITELLM_IP" != "localhost" ]]; then
-  echo "[INFO] Configurando resolución local de $LITELLM_DOMAIN -> $LITELLM_IP en /etc/hosts"
-  sed -i "/[[:space:]]\b${LITELLM_DOMAIN}\b/d" /etc/hosts
-  echo "$LITELLM_IP $LITELLM_DOMAIN" >> /etc/hosts
-fi
+  case "$cpu" in
+    x86_64|amd64|aarch64|arm64)
+      echo "[OK] CPU compatible: $cpu"
+      ;;
+    *)
+      echo "[ERROR] Arquitectura no soportada para este instalador: $cpu"
+      echo "[INFO] Arquitecturas probadas: x86_64 o aarch64/arm64"
+      exit 1
+      ;;
+  esac
+}
 
-echo "[CHECK] Probando conectividad y clave API contra $MODELS_URL ..."
-TMP_JSON="/tmp/opencode_litellm_models.$$"
-HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
-  -H "Authorization: Bearer $API_KEY" \
-  "$MODELS_URL")"
+parse_base_url() {
+  local base="$1"
+  BASE_URL_RAW="$base"
 
-if [[ "$HTTP_STATUS" != "200" ]]; then
-  echo "[ERROR] No pude conectar al endpoint. HTTP=$HTTP_STATUS"
-  echo "        Comprueba IP/puerto/dominio y API key."
-  cat "$TMP_JSON" >/tmp/opencode_litellm_models_last.err
+  if [[ "$BASE_URL_RAW" != http://* && "$BASE_URL_RAW" != https://* ]]; then
+    echo "[ERROR] La Base URL debe empezar por http:// o https://"
+    exit 1
+  fi
+
+  BASE_URL_RAW="${BASE_URL_RAW%/}"
+  if [[ "$BASE_URL_RAW" != */v1 ]]; then
+    BASE_URL_RAW="${BASE_URL_RAW}/v1"
+  fi
+
+  SCHEME="${BASE_URL_RAW%%://*}"
+  REST="${BASE_URL_RAW#*://}"
+  HOSTPORT="${REST%%/*}"
+  LITELLM_HOST="${HOSTPORT%%:*}"
+  LITELLM_PORT="${HOSTPORT##*:}"
+
+  if [[ "$LITELLM_HOST" == "$LITELLM_PORT" ]]; then
+    LITELLM_PORT=""
+  fi
+
+  if [[ -z "$LITELLM_PORT" ]]; then
+    LITELLM_PORT="4000"
+  fi
+}
+
+main() {
+  ensure_root
+  need_tty
+  check_cpu
+
+  ensure_dependency curl
+  ensure_dependency jq
+  ensure_dependency systemctl
+
+  if [[ ! -x "$OPENCODE_BIN" ]]; then
+    if command -v opencode >/dev/null 2>&1; then
+      OPENCODE_BIN="$(command -v opencode)"
+    else
+      echo "[ERROR] No encuentro opencode. Ajusta OPENCODE_BIN o instala opencode antes."
+      exit 1
+    fi
+  fi
+
+  read_input "[1/5] Base URL de LiteLLM (ej: http://lllm.cpd.local:4000/v1): " LITELLM_BASE_URL
+  LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local:4000/v1}"
+  parse_base_url "$LITELLM_BASE_URL"
+
+  read_input "[2/5] IP (opcional) para mapear ${LITELLM_HOST} en /etc/hosts: " LITELLM_IP
+  read_input "[3/5] Puerto donde publicar opencode web [4000]: " OPENCODE_PORT
+  OPENCODE_PORT="${OPENCODE_PORT:-4000}"
+  read_input "[4/5] Dominio a usar en la config [${LITELLM_HOST}]: " LITELLM_DOMAIN
+  LITELLM_DOMAIN="${LITELLM_DOMAIN:-$LITELLM_HOST}"
+  read_secret "[5/5] API Key de LiteLLM: " API_KEY
+
+  if [[ -z "$API_KEY" ]]; then
+    echo "[ERROR] La clave API no puede quedar vacía."
+    exit 1
+  fi
+
+  if [[ -z "${LITELLM_IP:-}" ]]; then
+    if getent hosts "$LITELLM_HOST" >/dev/null 2>&1; then
+      LITELLM_IP="$(getent hosts "$LITELLM_HOST" | awk '{print $1}' | head -n 1)"
+    fi
+  fi
+
+  if [[ -n "${LITELLM_IP:-}" ]]; then
+    echo "[INFO] Configurando resolución local de $LITELLM_DOMAIN -> $LITELLM_IP en /etc/hosts"
+    sed -i "/[[:space:]]\b${LITELLM_DOMAIN}\b/d" /etc/hosts
+    echo "$LITELLM_IP $LITELLM_DOMAIN" >> /etc/hosts
+  else
+    echo "[WARN] No se indicó IP y no se pudo resolver '$LITELLM_HOST'."
+    echo "[INFO] Si el DNS falla, lanza el script otra vez y proporciona la IP."
+  fi
+
+  API_BASE_URL="$SCHEME://$LITELLM_DOMAIN:$LITELLM_PORT/v1"
+  MODELS_URL="$API_BASE_URL/models"
+
+  echo "[CHECK] Probando conectividad y clave API contra $MODELS_URL ..."
+  TMP_JSON="/tmp/opencode_litellm_models.$$"
+  HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
+    -H "Authorization: Bearer $API_KEY" \
+    "$MODELS_URL")"
+
+  if [[ "$HTTP_STATUS" != "200" ]]; then
+    echo "[ERROR] No pude conectar al endpoint. HTTP=$HTTP_STATUS"
+    echo "        Comprueba IP/puerto/dominio y API key."
+    if [[ -s "$TMP_JSON" ]]; then
+      cat "$TMP_JSON"
+    fi
+    rm -f "$TMP_JSON"
+    exit 1
+  fi
+
+  if ! jq empty "$TMP_JSON" >/dev/null 2>&1; then
+    echo "[ERROR] La respuesta del endpoint no es JSON válido."
+    cat "$TMP_JSON"
+    rm -f "$TMP_JSON"
+    exit 1
+  fi
+
+  MODEL_IDS_RAW="$(jq -r 'if has("data") then .data[].id elif has("models") then .models[].id else .[]?.id end' "$TMP_JSON" | sed '/^null$/d' | sort -u)"
+  if [[ -z "$MODEL_IDS_RAW" ]]; then
+    echo "[ERROR] No encontré modelos en la respuesta de /v1/models."
+    cat "$TMP_JSON"
+    rm -f "$TMP_JSON"
+    exit 1
+  fi
   rm -f "$TMP_JSON"
-  exit 1
-fi
 
-if ! jq empty "$TMP_JSON" >/dev/null 2>&1; then
-  echo "[ERROR] La respuesta del endpoint no es JSON válido."
-  cat "$TMP_JSON"
-  rm -f "$TMP_JSON"
-  exit 1
-fi
+  MODELS_JSON="$(printf '%s\n' "$MODEL_IDS_RAW" | jq -Rsc 'split("\n") | map(select(length>0)) | map({(.): {name: .}}) | add')"
+  DEFAULT_MODEL="$(printf '%s\n' "$MODEL_IDS_RAW" | head -n 1)"
 
-MODEL_IDS_RAW=$(jq -r '
-  if has("data") then .data[].id
-  elif has("models") then .models[].id
-  else .[]?.id
-  end
-' "$TMP_JSON" | sed '/^null$/d' | sort -u)
+  echo "[OK] Conexión correcta. Modelos detectados:"
+  printf '%s\n' "$MODEL_IDS_RAW" | sed 's/^/  - /'
 
-if [[ -z "$MODEL_IDS_RAW" ]]; then
-  echo "[ERROR] No encontré modelos en la respuesta de /v1/models."
-  cat "$TMP_JSON"
-  rm -f "$TMP_JSON"
-  exit 1
-fi
+  echo "[INFO] Escribiendo configuración en $JSON_CONF y $JSONC_CONF"
+  mkdir -p "$CONFIG_DIR"
 
-rm -f "$TMP_JSON"
+  jq -n \
+    --arg schema "https://opencode.ai/config.json" \
+    --arg hostname "0.0.0.0" \
+    --arg baseurl "$API_BASE_URL" \
+    --arg apikey "$API_KEY" \
+    --argjson models "$MODELS_JSON" \
+    --arg default_model "$DEFAULT_MODEL" \
+    '{
+      "$schema": $schema,
+      "server": {"hostname": $hostname},
+      "provider": {
+        "litellm": {
+          "npm": "@ai-sdk/openai-compatible",
+          "name": "LiteLLM",
+          "options": {
+            "baseURL": $baseurl,
+            "apiKey": $apikey
+          },
+          "models": $models
+        }
+      },
+      "model": ("litellm/" + $default_model)
+    }' > "$JSON_CONF"
+  cp "$JSON_CONF" "$JSONC_CONF"
 
-MODELS_JSON=$(printf '%s\n' "$MODEL_IDS_RAW" | jq -Rsc '
-  split("\n") | map(select(length>0)) | map({(.): {name: .}}) | add
-')
-
-DEFAULT_MODEL="$(printf '%s\n' "$MODEL_IDS_RAW" | head -n 1)"
-
-echo "[OK] Conexión correcta. Modelos detectados:"
-echo "$MODEL_IDS_RAW" | sed 's/^/  - /'
-
-echo "[INFO] Escribiendo configuración en $JSON_CONF y $JSONC_CONF"
-mkdir -p "$CONFIG_DIR"
-
-jq -n \
-  --arg schema "https://opencode.ai/config.json" \
-  --arg hostname "0.0.0.0" \
-  --arg baseurl "http://$LITELLM_DOMAIN:$LITELLM_PORT/v1" \
-  --arg apikey "$API_KEY" \
-  --argjson models "$MODELS_JSON" \
-  --arg default_model "$DEFAULT_MODEL" \
-  '{
-    "$schema": $schema,
-    "server": {"hostname": $hostname},
-    "provider": {
-      "litellm": {
-        "npm": "@ai-sdk/openai-compatible",
-        "name": "LiteLLM",
-        "options": {
-          "baseURL": $baseurl,
-          "apiKey": $apikey
-        },
-        "models": $models
-      }
-    },
-    "model": ("litellm/" + $default_model)
-  }' > "$JSON_CONF"
-cp "$JSON_CONF" "$JSONC_CONF"
-
-echo "[INFO] Generando servicio systemd: $SERVICE_PATH"
-cat > "$SERVICE_PATH" <<EOF_SERVICE
+  echo "[INFO] Generando servicio systemd: $SERVICE_PATH"
+  cat > "$SERVICE_PATH" <<EOF_SERVICE
 [Unit]
 Description=opencode web
 After=network-online.target
@@ -172,26 +275,28 @@ StartLimitInterval=0
 WantedBy=multi-user.target
 EOF_SERVICE
 
-systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
+  systemctl daemon-reload
+  systemctl enable --now "$SERVICE_NAME"
 
-if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-  echo "[ERROR] El servicio no quedó activo. Revisa: journalctl -u $SERVICE_NAME -n 60"
-  exit 1
-fi
+  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    echo "[ERROR] El servicio no quedó activo. Revisa: journalctl -u $SERVICE_NAME -n 60"
+    exit 1
+  fi
 
-# validación final de acceso web
-if ! curl -sS --max-time 10 "http://127.0.0.1:$OPENCODE_PORT/ui/" >/dev/null; then
-  echo "[ADVERTENCIA] El servicio está activo, pero no respondió en http://127.0.0.1:$OPENCODE_PORT/ui/."
-else
-  echo "[OK] opencode web responde en http://127.0.0.1:$OPENCODE_PORT/ui/"
-fi
+  if ! curl -sS --max-time 10 "http://127.0.0.1:$OPENCODE_PORT/ui/" >/dev/null; then
+    echo "[ADVERTENCIA] El servicio está activo, pero no respondió en http://127.0.0.1:$OPENCODE_PORT/ui/."
+  else
+    echo "[OK] opencode web responde en http://127.0.0.1:$OPENCODE_PORT/ui/"
+  fi
 
-echo
-printf '[FINAL] Instalado y activo con:\n'
-printf '  - Config: %s\n  - Configc: %s\n' "$JSON_CONF" "$JSONC_CONF"
-printf '  - Servicio: %s\n' "$SERVICE_NAME"
-printf '  - URL base: %s\n' "http://$LITELLM_DOMAIN:$OPENCODE_PORT/ui/"
-printf '  - API usada: %s\n' "$BASE_URL"
-printf '  - Modelo por defecto: litellm/%s\n' "$DEFAULT_MODEL"
-echo
+  echo
+  printf '[FINAL] Instalado y activo con:\n'
+  printf '  - Config: %s\n  - Configc: %s\n' "$JSON_CONF" "$JSONC_CONF"
+  printf '  - Servicio: %s\n' "$SERVICE_NAME"
+  printf '  - URL base: %s\n' "http://$LITELLM_DOMAIN:$OPENCODE_PORT/ui/"
+  printf '  - API usada: %s\n' "$API_BASE_URL"
+  printf '  - Modelo por defecto: litellm/%s\n' "$DEFAULT_MODEL"
+  echo
+}
+
+main "$@"
