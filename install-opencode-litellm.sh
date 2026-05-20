@@ -203,19 +203,30 @@ expose_opencode_command() {
   OPENCODE_CMD="$(command -v opencode)"
   echo "[OK] Comando opencode disponible en $OPENCODE_CMD"
 
-  cat > /usr/local/bin/opencode-yolo <<'EOF_YOLO'
+  if [[ -f /usr/local/bin/opencode-yolo ]] && grep -q "dangerously-skip-permissions" /usr/local/bin/opencode-yolo; then
+    rm -f /usr/local/bin/opencode-yolo
+  fi
+  if [[ -f /usr/local/bin/opencode-web ]] && grep -q "opencode web --hostname" /usr/local/bin/opencode-web; then
+    rm -f /usr/local/bin/opencode-web
+  fi
+
+  cat > /usr/local/bin/oc-yolo <<'EOF_YOLO'
 #!/usr/bin/env bash
 exec opencode --dangerously-skip-permissions "$@"
 EOF_YOLO
-  chmod +x /usr/local/bin/opencode-yolo
-  echo "[OK] Alias YOLO disponible en /usr/local/bin/opencode-yolo"
+  chmod +x /usr/local/bin/oc-yolo
+  echo "[OK] Alias YOLO disponible en /usr/local/bin/oc-yolo"
 
-  cat > /usr/local/bin/opencode-web <<'EOF_WEB'
+  cat > /usr/local/bin/oc-web <<'EOF_WEB'
 #!/usr/bin/env bash
 exec opencode web --hostname 0.0.0.0 --port "${OPENCODE_WEB_PORT:-4000}" "$@"
 EOF_WEB
-  chmod +x /usr/local/bin/opencode-web
-  echo "[OK] Alias web disponible en /usr/local/bin/opencode-web"
+  chmod +x /usr/local/bin/oc-web
+  echo "[OK] Alias web disponible en /usr/local/bin/oc-web"
+}
+
+is_litellm_configured() {
+  [[ -s "$JSON_CONF" ]] && jq -e '.provider.litellm.options.baseURL? // empty' "$JSON_CONF" >/dev/null 2>&1
 }
 
 parse_base_url() {
@@ -269,6 +280,27 @@ main() {
     fi
   fi
   expose_opencode_command
+
+  if is_litellm_configured; then
+    EXISTING_BASE_URL="$(jq -r '.provider.litellm.options.baseURL // empty' "$JSON_CONF")"
+    echo "[INFO] Ya existe configuración LiteLLM en $JSON_CONF"
+    echo "[INFO] Base URL actual: $EXISTING_BASE_URL"
+    read_input "[1/1] Quieres modificar la configuración existente? [s/N]: " MODIFY_EXISTING_CONFIG
+    MODIFY_EXISTING_CONFIG="${MODIFY_EXISTING_CONFIG:-n}"
+    if [[ ! "$MODIFY_EXISTING_CONFIG" =~ ^([sS]|[sS][iI]|[yY]|[yY][eE][sS])$ ]]; then
+      echo "[INFO] Configuración intacta. Solo se aplicaron DNS, binario global y alias."
+      echo
+      printf '[FINAL] Arreglos aplicados sin modificar config:\n'
+      printf '  - Config existente: %s\n' "$JSON_CONF"
+      printf '  - API actual: %s\n' "$EXISTING_BASE_URL"
+      printf '  - Comando opencode: %s\n' "$OPENCODE_CMD"
+      printf '  - Comando YOLO: %s\n' "/usr/local/bin/oc-yolo"
+      printf '  - Comando web: %s\n' "/usr/local/bin/oc-web"
+      printf '  - Recarga shell si tu terminal cacheo comandos: hash -r\n'
+      echo
+      exit 0
+    fi
+  fi
 
   read_input "[1/6] Base URL de LiteLLM [http://lllm.cpd.local/v1]: " LITELLM_BASE_URL
   LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local/v1}"
@@ -420,7 +452,7 @@ EOF_SERVICE
       systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
       systemctl daemon-reload
     fi
-    echo "[INFO] Servicio persistente omitido. Puedes levantarlo manualmente con: opencode-web"
+    echo "[INFO] Servicio persistente omitido. Puedes levantarlo manualmente con: oc-web"
   fi
 
   echo
@@ -428,8 +460,8 @@ EOF_SERVICE
   printf '  - Config: %s\n  - Configc: %s\n' "$JSON_CONF" "$JSONC_CONF"
   printf '  - Servicio: %s\n' "$SERVICE_SUMMARY"
   printf '  - Comando opencode: %s\n' "$OPENCODE_CMD"
-  printf '  - Comando YOLO: %s\n' "/usr/local/bin/opencode-yolo"
-  printf '  - Comando web: %s\n' "/usr/local/bin/opencode-web"
+  printf '  - Comando YOLO: %s\n' "/usr/local/bin/oc-yolo"
+  printf '  - Comando web: %s\n' "/usr/local/bin/oc-web"
   printf '  - URL base: %s\n' "http://$LITELLM_DOMAIN:$OPENCODE_PORT/ui/"
   printf '  - API usada: %s\n' "$API_BASE_URL"
   printf '  - Modelo por defecto: litellm/%s\n' "$DEFAULT_MODEL"
