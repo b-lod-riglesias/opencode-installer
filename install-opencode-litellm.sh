@@ -105,6 +105,67 @@ check_cpu() {
   esac
 }
 
+detect_primary_network() {
+  PRIMARY_IFACE=""
+  PRIMARY_IP=""
+
+  if command -v ip >/dev/null 2>&1; then
+    PRIMARY_IFACE="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')"
+    PRIMARY_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')"
+  fi
+
+  if [[ -z "$PRIMARY_IP" ]] && command -v hostname >/dev/null 2>&1; then
+    PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+}
+
+configure_internal_dns() {
+  detect_primary_network
+
+  if [[ ! "$PRIMARY_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "[WARN] No pude detectar la IP principal del host; no configuro DNS interno automáticamente."
+    return
+  fi
+
+  INTERNAL_DNS="${PRIMARY_IP%.*}.254"
+  echo "[INFO] IP principal detectada: $PRIMARY_IP"
+  echo "[INFO] DNS interno derivado: $INTERNAL_DNS"
+
+  if systemctl list-unit-files systemd-resolved.service --no-legend 2>/dev/null | grep -q '^systemd-resolved\.service'; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/opencode-litellm-dns.conf <<EOF_DNS
+[Resolve]
+DNS=$INTERNAL_DNS
+Domains=~cpd.local
+EOF_DNS
+    systemctl restart systemd-resolved.service || true
+
+    if [[ -n "$PRIMARY_IFACE" ]] && command -v resolvectl >/dev/null 2>&1; then
+      resolvectl dns "$PRIMARY_IFACE" "$INTERNAL_DNS" || true
+      resolvectl domain "$PRIMARY_IFACE" "~cpd.local" || true
+    fi
+
+    echo "[OK] DNS interno configurado para cpd.local con systemd-resolved."
+    return
+  fi
+
+  if [[ -f /etc/resolv.conf && ! -L /etc/resolv.conf ]]; then
+    cp /etc/resolv.conf "/etc/resolv.conf.opencode-litellm.bak.$(date +%s)"
+    if ! grep -qE "^[[:space:]]*nameserver[[:space:]]+$INTERNAL_DNS([[:space:]]|$)" /etc/resolv.conf; then
+      {
+        echo "nameserver $INTERNAL_DNS"
+        cat /etc/resolv.conf
+      } > /tmp/opencode-litellm-resolv.conf
+      cp /tmp/opencode-litellm-resolv.conf /etc/resolv.conf
+      rm -f /tmp/opencode-litellm-resolv.conf
+    fi
+    echo "[OK] DNS interno añadido a /etc/resolv.conf."
+    return
+  fi
+
+  echo "[WARN] No pude dejar DNS persistente automáticamente. Usa DNS $INTERNAL_DNS para resolver cpd.local."
+}
+
 install_opencode() {
   echo "[WARN] No encuentro opencode en $OPENCODE_BIN ni en PATH."
   echo "[INFO] Instalando opencode con el instalador oficial..."
@@ -163,6 +224,7 @@ main() {
   ensure_dependency curl
   ensure_dependency jq
   ensure_dependency systemctl
+  configure_internal_dns
 
   if [[ ! -x "$OPENCODE_BIN" ]]; then
     if command -v opencode >/dev/null 2>&1; then
@@ -176,8 +238,7 @@ main() {
   LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local/v1}"
   parse_base_url "$LITELLM_BASE_URL"
 
-  read_input "[2/5] IP (opcional) para mapear ${LITELLM_HOST} en /etc/hosts [10.20.20.174]: " LITELLM_IP
-  LITELLM_IP="${LITELLM_IP:-10.20.20.174}"
+  read_input "[2/5] IP opcional para forzar ${LITELLM_HOST} en /etc/hosts (normalmente vacío): " LITELLM_IP
   read_input "[3/5] Puerto donde publicar opencode web [4000]: " OPENCODE_PORT
   OPENCODE_PORT="${OPENCODE_PORT:-4000}"
   read_input "[4/5] Dominio a usar en la config [${LITELLM_HOST}]: " LITELLM_DOMAIN
@@ -189,19 +250,17 @@ main() {
     exit 1
   fi
 
-  if [[ -z "${LITELLM_IP:-}" ]]; then
-    if getent hosts "$LITELLM_HOST" >/dev/null 2>&1; then
-      LITELLM_IP="$(getent hosts "$LITELLM_HOST" | awk '{print $1}' | head -n 1)"
-    fi
-  fi
-
   if [[ -n "${LITELLM_IP:-}" ]]; then
     echo "[INFO] Configurando resolución local de $LITELLM_DOMAIN -> $LITELLM_IP en /etc/hosts"
     sed -i "/[[:space:]]\b${LITELLM_DOMAIN}\b/d" /etc/hosts
     echo "$LITELLM_IP $LITELLM_DOMAIN" >> /etc/hosts
   else
-    echo "[WARN] No se indicó IP y no se pudo resolver '$LITELLM_HOST'."
-    echo "[INFO] Si el DNS falla, lanza el script otra vez y proporciona la IP."
+    if getent hosts "$LITELLM_HOST" >/dev/null 2>&1; then
+      RESOLVED_IP="$(getent hosts "$LITELLM_HOST" | awk '{print $1}' | head -n 1)"
+      echo "[OK] $LITELLM_HOST resuelve por DNS a $RESOLVED_IP"
+    else
+      echo "[WARN] $LITELLM_HOST no resuelve por DNS. Si falla la prueba, repite indicando una IP para /etc/hosts."
+    fi
   fi
 
   if [[ "$SCHEME" == "http" && "$LITELLM_PORT" == "80" ]]; then
