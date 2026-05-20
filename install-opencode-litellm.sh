@@ -225,8 +225,30 @@ EOF_WEB
   echo "[OK] Alias web disponible en /usr/local/bin/oc-web"
 }
 
-is_litellm_configured() {
-  [[ -s "$JSON_CONF" ]] && jq -e '.provider.litellm.options.baseURL? // empty' "$JSON_CONF" >/dev/null 2>&1
+existing_opencode_config_summary() {
+  EXISTING_CONFIG_ITEMS=""
+  EXISTING_BASE_URL=""
+
+  if [[ -s "$JSON_CONF" ]]; then
+    EXISTING_CONFIG_ITEMS="${EXISTING_CONFIG_ITEMS}${JSON_CONF} "
+    EXISTING_BASE_URL="$(jq -r '.provider.litellm.options.baseURL // empty' "$JSON_CONF" 2>/dev/null || true)"
+  fi
+
+  if [[ -s "$JSONC_CONF" ]]; then
+    EXISTING_CONFIG_ITEMS="${EXISTING_CONFIG_ITEMS}${JSONC_CONF} "
+    if [[ -z "$EXISTING_BASE_URL" ]]; then
+      EXISTING_BASE_URL="$(jq -r '.provider.litellm.options.baseURL // empty' "$JSONC_CONF" 2>/dev/null || true)"
+    fi
+  fi
+
+  if systemctl list-unit-files "$SERVICE_NAME" --no-legend 2>/dev/null | grep -q "^$SERVICE_NAME"; then
+    EXISTING_CONFIG_ITEMS="${EXISTING_CONFIG_ITEMS}${SERVICE_NAME} "
+  fi
+}
+
+is_opencode_configured() {
+  existing_opencode_config_summary
+  [[ -n "$EXISTING_CONFIG_ITEMS" ]]
 }
 
 parse_base_url() {
@@ -281,18 +303,22 @@ main() {
   fi
   expose_opencode_command
 
-  if is_litellm_configured; then
-    EXISTING_BASE_URL="$(jq -r '.provider.litellm.options.baseURL // empty' "$JSON_CONF")"
-    echo "[INFO] Ya existe configuración LiteLLM en $JSON_CONF"
-    echo "[INFO] Base URL actual: $EXISTING_BASE_URL"
+  if is_opencode_configured; then
+    echo "[INFO] Ya existe una instalación/configuración de opencode:"
+    printf '       %s\n' "$EXISTING_CONFIG_ITEMS"
+    if [[ -n "$EXISTING_BASE_URL" ]]; then
+      echo "[INFO] Base URL actual: $EXISTING_BASE_URL"
+    fi
     read_input "[1/1] Quieres modificar la configuración existente? [s/N]: " MODIFY_EXISTING_CONFIG
     MODIFY_EXISTING_CONFIG="${MODIFY_EXISTING_CONFIG:-n}"
     if [[ ! "$MODIFY_EXISTING_CONFIG" =~ ^([sS]|[sS][iI]|[yY]|[yY][eE][sS])$ ]]; then
       echo "[INFO] Configuración intacta. Solo se aplicaron DNS, binario global y alias."
       echo
       printf '[FINAL] Arreglos aplicados sin modificar config:\n'
-      printf '  - Config existente: %s\n' "$JSON_CONF"
-      printf '  - API actual: %s\n' "$EXISTING_BASE_URL"
+      printf '  - Config/servicio existente: %s\n' "$EXISTING_CONFIG_ITEMS"
+      if [[ -n "$EXISTING_BASE_URL" ]]; then
+        printf '  - API actual: %s\n' "$EXISTING_BASE_URL"
+      fi
       printf '  - Comando opencode: %s\n' "$OPENCODE_CMD"
       printf '  - Comando YOLO: %s\n' "/usr/local/bin/oc-yolo"
       printf '  - Comando web: %s\n' "/usr/local/bin/oc-web"

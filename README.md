@@ -21,7 +21,7 @@ sudo /root/install-opencode-litellm.sh
 - Expone el comando `opencode` en `/usr/local/bin/opencode`.
 - Crea el alias `oc-yolo` para ejecutar `opencode --dangerously-skip-permissions`.
 - Crea el alias `oc-web` para ejecutar `opencode web --hostname 0.0.0.0 --port 4000`.
-- Si ya hay configuración LiteLLM, pregunta si quieres modificarla. Si respondes que no, solo aplica DNS, binario global y alias.
+- Si ya hay configuración de opencode o servicio existente, pregunta si quieres modificarla. Si respondes que no, solo aplica DNS, binario global y alias.
 - Pregunta si quieres crear y habilitar el servicio systemd persistente:
   - `opencode-web.service`
 
