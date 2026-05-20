@@ -19,6 +19,7 @@ sudo /root/install-opencode-litellm.sh
   - `/etc/systemd/resolved.conf.d/opencode-litellm-dns.conf` cuando usa `systemd-resolved`
   - `/etc/hosts` solo si indicas una IP manual de fallback
 - Expone el comando `opencode` en `/usr/local/bin/opencode`.
+- Crea el alias `opencode-yolo` para ejecutar `opencode --dangerously-skip-permissions`.
 - Crea y habilita el servicio systemd:
   - `opencode-web.service`
 

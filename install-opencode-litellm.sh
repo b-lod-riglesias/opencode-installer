@@ -202,6 +202,13 @@ expose_opencode_command() {
 
   OPENCODE_CMD="$(command -v opencode)"
   echo "[OK] Comando opencode disponible en $OPENCODE_CMD"
+
+  cat > /usr/local/bin/opencode-yolo <<'EOF_YOLO'
+#!/usr/bin/env bash
+exec opencode --dangerously-skip-permissions "$@"
+EOF_YOLO
+  chmod +x /usr/local/bin/opencode-yolo
+  echo "[OK] Alias YOLO disponible en /usr/local/bin/opencode-yolo"
 }
 
 parse_base_url() {
@@ -402,6 +409,7 @@ EOF_SERVICE
   printf '  - Config: %s\n  - Configc: %s\n' "$JSON_CONF" "$JSONC_CONF"
   printf '  - Servicio: %s\n' "$SERVICE_NAME"
   printf '  - Comando opencode: %s\n' "$OPENCODE_CMD"
+  printf '  - Comando YOLO: %s\n' "/usr/local/bin/opencode-yolo"
   printf '  - URL base: %s\n' "http://$LITELLM_DOMAIN:$OPENCODE_PORT/ui/"
   printf '  - API usada: %s\n' "$API_BASE_URL"
   printf '  - Modelo por defecto: litellm/%s\n' "$DEFAULT_MODEL"
