@@ -69,7 +69,7 @@ ensure_dependency() {
   fi
 
   echo "[WARN] Falta dependencia: $dep"
-  if [[ "$dep" == "curl" || "$dep" == "jq" || "$dep" == "systemctl" ]]; then
+  if [[ "$dep" == "curl" || "$dep" == "jq" ]]; then
     echo "[INFO] Intentando instalar $dep..."
     install_dependency "$dep"
     if need_cmd "$dep"; then
@@ -103,6 +103,23 @@ check_cpu() {
       exit 1
       ;;
   esac
+}
+
+install_opencode() {
+  echo "[WARN] No encuentro opencode en $OPENCODE_BIN ni en PATH."
+  echo "[INFO] Instalando opencode con el instalador oficial..."
+  curl -fsSL https://opencode.ai/install | bash
+
+  if [[ -x "/root/.opencode/bin/opencode" ]]; then
+    OPENCODE_BIN="/root/.opencode/bin/opencode"
+  elif command -v opencode >/dev/null 2>&1; then
+    OPENCODE_BIN="$(command -v opencode)"
+  else
+    echo "[ERROR] opencode no quedó instalado o no está en PATH."
+    exit 1
+  fi
+
+  echo "[OK] opencode instalado en $OPENCODE_BIN"
 }
 
 parse_base_url() {
@@ -147,8 +164,7 @@ main() {
     if command -v opencode >/dev/null 2>&1; then
       OPENCODE_BIN="$(command -v opencode)"
     else
-      echo "[ERROR] No encuentro opencode. Ajusta OPENCODE_BIN o instala opencode antes."
-      exit 1
+      install_opencode
     fi
   fi
 
