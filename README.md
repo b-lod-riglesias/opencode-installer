@@ -12,7 +12,7 @@ sudo /root/install-opencode-litellm.sh
 
 - Detecta la IP principal del host y configura el DNS interno equivalente acabado en `.254`.
 - Usa por defecto `http://lllm.cpd.local/v1`.
-- Corrige `https://lllm.cpd.local/v1` a HTTP para evitar errores de certificado self-signed en opencode.
+- Corrige `lllm.cpd.local` al backend directo `http://10.20.20.56:4000/v1` si el proxy fuerza HTTPS y rompe opencode.
 - Pide la clave API y valida `/v1/models`.
 - Crea/actualiza:
   - `/root/.config/opencode/opencode.json`

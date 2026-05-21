@@ -263,11 +263,11 @@ repair_known_certificate_baseurl() {
 
     current_base="$(jq -r '.provider.litellm.options.baseURL // empty' "$file" 2>/dev/null || true)"
     case "$current_base" in
-      https://lllm.cpd.local/v1|https://lllm.cpd.local:443/v1)
-        echo "[WARN] Detectado $current_base en $file; puede causar 'unable to verify the first certificate'."
-        echo "[INFO] Corrigiendo a http://lllm.cpd.local/v1"
+      http://lllm.cpd.local/v1|https://lllm.cpd.local/v1|https://lllm.cpd.local:443/v1)
+        echo "[WARN] Detectado $current_base en $file; el proxy redirige a HTTPS y opencode falla con el certificado."
+        echo "[INFO] Corrigiendo a http://10.20.20.56:4000/v1"
         tmp_file="$(mktemp)"
-        jq '.provider.litellm.options.baseURL = "http://lllm.cpd.local/v1"' "$file" > "$tmp_file"
+        jq '.provider.litellm.options.baseURL = "http://10.20.20.56:4000/v1"' "$file" > "$tmp_file"
         cp "$tmp_file" "$file"
         rm -f "$tmp_file"
         ;;
@@ -290,9 +290,9 @@ parse_base_url() {
   fi
 
   case "$BASE_URL_RAW" in
-    https://lllm.cpd.local/v1|https://lllm.cpd.local:443/v1)
-      echo "[WARN] lllm.cpd.local usa certificado self-signed en HTTPS; usando HTTP interno."
-      BASE_URL_RAW="http://lllm.cpd.local/v1"
+    http://lllm.cpd.local/v1|https://lllm.cpd.local/v1|https://lllm.cpd.local:443/v1)
+      echo "[WARN] lllm.cpd.local redirige a HTTPS y opencode falla con el certificado; usando backend HTTP directo."
+      BASE_URL_RAW="http://10.20.20.56:4000/v1"
       ;;
   esac
 
@@ -405,6 +405,16 @@ main() {
   HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
     -H "Authorization: Bearer $API_KEY" \
     "$MODELS_URL")"
+
+  if [[ "$HTTP_STATUS" =~ ^30[1278]$ && "$API_BASE_URL" == "http://lllm.cpd.local/v1" ]]; then
+    echo "[WARN] $API_BASE_URL redirige a HTTPS; opencode no maneja bien ese proxy con certificado self-signed."
+    API_BASE_URL="http://10.20.20.56:4000/v1"
+    MODELS_URL="$API_BASE_URL/models"
+    echo "[INFO] Reintentando contra backend directo: $MODELS_URL"
+    HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
+      -H "Authorization: Bearer $API_KEY" \
+      "$MODELS_URL")"
+  fi
 
   if [[ "$HTTP_STATUS" != "200" ]]; then
     echo "[ERROR] No pude conectar al endpoint. HTTP=$HTTP_STATUS"
