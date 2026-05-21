@@ -251,6 +251,30 @@ is_opencode_configured() {
   [[ -n "$EXISTING_CONFIG_ITEMS" ]]
 }
 
+repair_known_certificate_baseurl() {
+  local file
+  local current_base
+  local tmp_file
+
+  for file in "$JSON_CONF" "$JSONC_CONF"; do
+    if [[ ! -s "$file" ]]; then
+      continue
+    fi
+
+    current_base="$(jq -r '.provider.litellm.options.baseURL // empty' "$file" 2>/dev/null || true)"
+    case "$current_base" in
+      https://lllm.cpd.local/v1|https://lllm.cpd.local:443/v1)
+        echo "[WARN] Detectado $current_base en $file; puede causar 'unable to verify the first certificate'."
+        echo "[INFO] Corrigiendo a http://lllm.cpd.local/v1"
+        tmp_file="$(mktemp)"
+        jq '.provider.litellm.options.baseURL = "http://lllm.cpd.local/v1"' "$file" > "$tmp_file"
+        cp "$tmp_file" "$file"
+        rm -f "$tmp_file"
+        ;;
+    esac
+  done
+}
+
 parse_base_url() {
   local base="$1"
   BASE_URL_RAW="$base"
@@ -264,6 +288,13 @@ parse_base_url() {
   if [[ "$BASE_URL_RAW" != */v1 ]]; then
     BASE_URL_RAW="${BASE_URL_RAW}/v1"
   fi
+
+  case "$BASE_URL_RAW" in
+    https://lllm.cpd.local/v1|https://lllm.cpd.local:443/v1)
+      echo "[WARN] lllm.cpd.local usa certificado self-signed en HTTPS; usando HTTP interno."
+      BASE_URL_RAW="http://lllm.cpd.local/v1"
+      ;;
+  esac
 
   SCHEME="${BASE_URL_RAW%%://*}"
   REST="${BASE_URL_RAW#*://}"
@@ -302,6 +333,7 @@ main() {
     fi
   fi
   expose_opencode_command
+  repair_known_certificate_baseurl
 
   if is_opencode_configured; then
     echo "[INFO] Ya existe una instalación/configuración de opencode:"
