@@ -739,33 +739,19 @@ main() {
 
     # Exit codes comunes de error SSL en curl: 35, 51, 58, 60, 77, 80, 82
     if [[ "$curl_exit" -eq 35 || "$curl_exit" -eq 51 || "$curl_exit" -eq 58 || "$curl_exit" -eq 60 || "$curl_exit" -eq 77 || "$curl_exit" -eq 80 || "$curl_exit" -eq 82 ]]; then
-      echo "[WARN] Certificado SSL no válido/self-signed detectado."
-      local insecure_status
-      insecure_status="$(curl -sSLk --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
-        -H "Authorization: Bearer $API_KEY" \
-        "$MODELS_URL" 2>/dev/null || true)"
-      if [[ "$insecure_status" == "200" ]]; then
-        HTTP_STATUS="200"
-        echo "[OK] Conexión verificada ignorando certificado (solo para prueba)."
-        if [[ "$API_BASE_URL" == http://* ]]; then
-          API_BASE_URL="${API_BASE_URL/http:/https:}"
-          MODELS_URL="$API_BASE_URL/models"
-          echo "[INFO] El proxy redirige a HTTPS. Actualizando Base URL a $API_BASE_URL"
-        fi
+      echo "[WARN] Certificado SSL no válido/self-signed detectado. Buscando backend HTTP directo..."
+      local fallback
+      if fallback="$(try_http_fallback "$LITELLM_HOST" "$API_KEY")"; then
+        API_BASE_URL="$fallback"
+        MODELS_URL="$API_BASE_URL/models"
+        echo "[OK] Backend HTTP directo encontrado: $API_BASE_URL"
+        HTTP_STATUS="$(curl -sSL --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
+          -H "Authorization: Bearer $API_KEY" \
+          "$MODELS_URL" 2>/dev/null || true)"
+      else
+        echo "[ERROR] No encontré backend HTTP directo. No puedo configurar opencode con este certificado."
+        exit 1
       fi
-    fi
-  fi
-
-  # Si aun asi no es 200, probar fallback HTTP directo al backend
-  if [[ "$HTTP_STATUS" != "200" ]]; then
-    local fallback
-    if fallback="$(try_http_fallback "$LITELLM_HOST" "$API_KEY")"; then
-      API_BASE_URL="$fallback"
-      MODELS_URL="$API_BASE_URL/models"
-      echo "[OK] Backend HTTP directo encontrado: $API_BASE_URL"
-      HTTP_STATUS="$(curl -sSL --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
-        -H "Authorization: Bearer $API_KEY" \
-        "$MODELS_URL" 2>/dev/null || true)"
     fi
   fi
 
