@@ -36,8 +36,8 @@ read_tty() {
   tmpfile="$(mktemp)"
 
   (
-    # Redirigir los 3 descriptores al TTY real para que readline (read -e) funcione
-    exec </dev/tty >/dev/tty 2>/dev/tty
+    # Solo redirigir stdin al TTY real para que read -e funcione interactivamente
+    exec </dev/tty
     local val=""
     if [[ -n "$default" ]]; then
       read -er -p "$prompt" -i "$default" val || true
