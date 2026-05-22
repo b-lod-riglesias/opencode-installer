@@ -259,8 +259,9 @@ expose_opencode_command() {
   local target="/usr/local/bin/opencode"
   rm -f "$target"
 
-  cat > "$target" <<'EOF_OPENCODE'
+  cat > "$target" <<EOF_OPENCODE
 #!/usr/bin/env bash
+export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
 exec /usr/local/share/opencode/bin/opencode "$@"
 EOF_OPENCODE
@@ -278,16 +279,18 @@ EOF_OPENCODE
 
   rm -f /usr/local/bin/opencode-yolo /usr/local/bin/opencode-web
 
-  cat > /usr/local/bin/oc-yolo <<'EOF_YOLO'
+  cat > /usr/local/bin/oc-yolo <<EOF_YOLO
 #!/usr/bin/env bash
+export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
 exec opencode --dangerously-skip-permissions "$@"
 EOF_YOLO
   chmod +x /usr/local/bin/oc-yolo
   echo "[OK] Alias YOLO disponible en /usr/local/bin/oc-yolo"
 
-  cat > /usr/local/bin/oc-web <<'EOF_WEB'
+  cat > /usr/local/bin/oc-web <<EOF_WEB
 #!/usr/bin/env bash
+export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
 exec opencode web --hostname 0.0.0.0 --port "${OPENCODE_WEB_PORT:-4000}" "$@"
 EOF_WEB
@@ -457,6 +460,27 @@ try_http_fallback() {
   return 1
 }
 
+# Ruta al certificado CA wildcard incluido en el repo
+CA_CERT_PATH="/usr/local/share/ca-certificates/cpd-local-wildcard.crt"
+
+install_ca_certificate() {
+  if [[ ! -f "${0%/*}/cpd-local-wildcard.crt" ]]; then
+    echo "[WARN] No encuentro cpd-local-wildcard.crt junto al script. Omito instalación de certificado CA."
+    return
+  fi
+
+  mkdir -p /usr/local/share/ca-certificates
+  cp -f "${0%/*}/cpd-local-wildcard.crt" "$CA_CERT_PATH"
+  chmod 644 "$CA_CERT_PATH"
+
+  if command -v update-ca-certificates >/dev/null 2>&1; then
+    update-ca-certificates --fresh >/dev/null 2>&1 || true
+    echo "[OK] Certificado CA *.cpd.local instalado en el sistema."
+  else
+    echo "[WARN] update-ca-certificates no disponible. El certificado se copió pero no se activó."
+  fi
+}
+
 copy_config_to_sudo_user() {
   local target_user="${SUDO_USER:-}"
   if [[ -z "$target_user" ]]; then
@@ -613,6 +637,7 @@ main() {
   ensure_dependency jq
   ensure_dependency systemctl
   configure_internal_dns
+  install_ca_certificate
 
   local global_link="/usr/local/bin/opencode"
   if [[ -L "$global_link" ]] && [[ ! -e "$global_link" ]]; then
@@ -820,6 +845,7 @@ User=root
 Group=root
 WorkingDirectory=/root
 Environment=HOME=/root
+Environment=NODE_EXTRA_CA_CERTS=$CA_CERT_PATH
 Environment=NODE_TLS_REJECT_UNAUTHORIZED=0
 Environment=PATH=/usr/local/share/opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=${OPENCODE_BIN} web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
