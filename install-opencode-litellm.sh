@@ -351,6 +351,15 @@ repair_known_certificate_baseurl() {
   local file
   local current_base
   local tmp_file
+  local existing_api_key=""
+
+  # Intentar leer API key de la configuración existente
+  if [[ -s "$JSON_CONF" ]]; then
+    existing_api_key="$(jq -r '.provider.litellm.options.apiKey // empty' "$JSON_CONF" 2>/dev/null || true)"
+  fi
+  if [[ -z "$existing_api_key" ]] && [[ -s "$JSONC_CONF" ]]; then
+    existing_api_key="$(jq -r '.provider.litellm.options.apiKey // empty' "$JSONC_CONF" 2>/dev/null || true)"
+  fi
 
   for file in "$JSON_CONF" "$JSONC_CONF"; do
     if [[ ! -s "$file" ]]; then
@@ -364,7 +373,7 @@ repair_known_certificate_baseurl() {
 
     local fallback_url=""
 
-    if curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${EXISTING_API_KEY:-fake}" "http://lllm.cpd.local:4000/v1/models" 2>/dev/null | grep -q '^200$'; then
+    if curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${existing_api_key:-fake}" "http://lllm.cpd.local:4000/v1/models" 2>/dev/null | grep -q '^200$'; then
       fallback_url="http://lllm.cpd.local:4000/v1"
     else
       local resolved_ip
@@ -372,7 +381,7 @@ repair_known_certificate_baseurl() {
       if [[ -n "$resolved_ip" ]]; then
         for port in 4000 8000 8080 3000 80; do
           local test_url="http://${resolved_ip}:${port}/v1"
-          if curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${EXISTING_API_KEY:-fake}" "$test_url/models" 2>/dev/null | grep -q '^200$'; then
+          if curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${existing_api_key:-fake}" "$test_url/models" 2>/dev/null | grep -q '^200$'; then
             fallback_url="$test_url"
             break
           fi
