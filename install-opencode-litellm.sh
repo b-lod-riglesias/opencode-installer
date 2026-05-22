@@ -591,6 +591,10 @@ main() {
     exit 0
   fi
 
+  # Redirigir todo el output interactivo al TTY real para evitar desincronización
+  # con el pipe de curl | bash
+  exec >/dev/tty 2>/dev/tty
+
   ensure_root
   need_tty
   check_cpu
