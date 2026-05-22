@@ -43,27 +43,22 @@ read_tty() {
   local prompt="$1"
   local default="$2"
   local varname="$3"
-  local tmpfile
-  tmpfile="$(mktemp)"
+  local val=""
 
-  (
-    # Solo redirigir stdin al TTY real para que read -e funcione interactivamente
-    exec </dev/tty
-    local val=""
-    if [[ -n "$default" ]]; then
-      read -er -p "$prompt" -i "$default" val || true
-    else
-      read -er -p "$prompt" val || true
-    fi
-    printf '%s' "$val" > "$tmpfile"
-  )
-
-  local result=""
-  if [[ -s "$tmpfile" ]]; then
-    result="$(cat "$tmpfile")"
+  # Abrir /dev/tty como fd 3 para lectura interactiva sin subshell
+  if ! exec 3<>/dev/tty 2>/dev/null; then
+    echo "[ERROR] No hay TTY disponible para entrada interactiva."
+    exit 1
   fi
-  rm -f "$tmpfile"
-  printf -v "$varname" '%s' "$result"
+
+  if [[ -n "$default" ]]; then
+    read -u 3 -er -p "$prompt" -i "$default" val >&2 || true
+  else
+    read -u 3 -er -p "$prompt" val >&2 || true
+  fi
+
+  exec 3<&- 2>/dev/null || true
+  printf -v "$varname" '%s' "$val"
 }
 
 install_dependency() {
