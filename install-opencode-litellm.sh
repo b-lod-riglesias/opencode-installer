@@ -32,26 +32,26 @@ read_tty() {
   local prompt="$1"
   local default="$2"
   local varname="$3"
-  local value=""
+  local tmpfile
+  tmpfile="$(mktemp)"
 
-  if [[ -n "$default" ]]; then
-    value="$(bash -c '
-      exec < /dev/tty
-      read -er -p "$1" -i "$2" val
-      printf "%s\n" "$val"
-    ' _ "$prompt" "$default")"
-  else
-    value="$(bash -c '
-      exec < /dev/tty
-      read -er -p "$1" val
-      printf "%s\n" "$val"
-    ' _ "$prompt")"
+  (
+    exec < /dev/tty
+    local val=""
+    if [[ -n "$default" ]]; then
+      read -er -p "$prompt" -i "$default" val
+    else
+      read -er -p "$prompt" val
+    fi
+    printf '%s' "$val" > "$tmpfile"
+  )
+
+  local result=""
+  if [[ -s "$tmpfile" ]]; then
+    result="$(cat "$tmpfile")"
   fi
-
-  # Quitar newline final que añade printf
-  value="${value%$'\n'}"
-
-  printf -v "$varname" '%s' "$value"
+  rm -f "$tmpfile"
+  printf -v "$varname" '%s' "$result"
 }
 
 install_dependency() {
