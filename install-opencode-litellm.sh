@@ -175,6 +175,8 @@ install_opencode() {
   local detected_bin=""
   if [[ -x "/root/.opencode/bin/opencode" ]]; then
     detected_bin="/root/.opencode/bin/opencode"
+  elif [[ -x "$HOME/.opencode/bin/opencode" ]]; then
+    detected_bin="$HOME/.opencode/bin/opencode"
   elif command -v opencode >/dev/null 2>&1; then
     detected_bin="$(command -v opencode)"
   fi
@@ -184,21 +186,21 @@ install_opencode() {
     exit 1
   fi
 
+  # Limpiar symlink roto previo en /usr/local/bin si existe
+  local global_link="/usr/local/bin/opencode"
+  if [[ -L "$global_link" ]] && [[ ! -e "$global_link" ]]; then
+    rm -f "$global_link"
+  fi
+
   # Mover la instalación a una ruta global legible por cualquier usuario
   rm -rf "$OPENCODE_DIR_GLOBAL"
   mkdir -p "$(dirname "$OPENCODE_DIR_GLOBAL")"
-  if [[ -d "/root/.opencode" ]]; then
-    cp -a /root/.opencode "$OPENCODE_DIR_GLOBAL"
-  elif [[ -d "$HOME/.opencode" ]]; then
-    cp -a "$HOME/.opencode" "$OPENCODE_DIR_GLOBAL"
-  else
-    # Fallback: buscar el directorio .opencode del detected_bin
-    local opencode_dir
-    opencode_dir="$(dirname "$(dirname "$detected_bin")")"
-    cp -a "$opencode_dir" "$OPENCODE_DIR_GLOBAL"
-  fi
+  local src_dir
+  src_dir="$(dirname "$(dirname "$detected_bin")")"
+  cp -a "$src_dir" "$OPENCODE_DIR_GLOBAL"
 
   chmod -R a+rX "$OPENCODE_DIR_GLOBAL"
+  chmod +x "$OPENCODE_DIR_GLOBAL/bin/opencode" 2>/dev/null || true
   OPENCODE_BIN="$OPENCODE_DIR_GLOBAL/bin/opencode"
 
   echo "[OK] opencode instalado en $OPENCODE_BIN"
@@ -210,12 +212,21 @@ expose_opencode_command() {
     exit 1
   fi
 
-  ln -sf "$OPENCODE_BIN" /usr/local/bin/opencode
+  local target="/usr/local/bin/opencode"
+
+  # Evitar symlink ciclico: si OPENCODE_BIN ya es el target, no recrearlo
+  if [[ "$OPENCODE_BIN" != "$target" ]]; then
+    # Si el target es un symlink roto, eliminarlo
+    if [[ -L "$target" ]] && [[ ! -e "$target" ]]; then
+      rm -f "$target"
+    fi
+    ln -sf "$OPENCODE_BIN" "$target"
+  fi
 
   if ! command -v opencode >/dev/null 2>&1; then
     echo "[ERROR] No pude dejar opencode disponible en PATH."
     echo "        Binario detectado: $OPENCODE_BIN"
-    echo "        Enlace esperado: /usr/local/bin/opencode"
+    echo "        Enlace esperado: $target"
     exit 1
   fi
 
@@ -468,10 +479,24 @@ main() {
   ensure_dependency systemctl
   configure_internal_dns
 
+  # Limpiar symlink roto previo en /usr/local/bin si existe
+  local global_link="/usr/local/bin/opencode"
+  if [[ -L "$global_link" ]] && [[ ! -e "$global_link" ]]; then
+    rm -f "$global_link"
+  fi
+
   if [[ ! -x "$OPENCODE_BIN" ]]; then
+    local path_bin=""
     if command -v opencode >/dev/null 2>&1; then
-      OPENCODE_BIN="$(command -v opencode)"
-    else
+      path_bin="$(command -v opencode)"
+      # Verificar que no sea un symlink roto
+      if [[ -x "$path_bin" ]]; then
+        OPENCODE_BIN="$path_bin"
+      else
+        rm -f "$path_bin" 2>/dev/null || true
+      fi
+    fi
+    if [[ ! -x "$OPENCODE_BIN" ]]; then
       install_opencode
     fi
   fi
