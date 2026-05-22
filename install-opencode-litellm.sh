@@ -258,15 +258,66 @@ expose_opencode_command() {
     fi
   fi
 
+  # Crear patches de Node.js para ignorar certificados self-signed
+  mkdir -p "$OPENCODE_DIR_GLOBAL"
+
+  cat > "$OPENCODE_DIR_GLOBAL/tls-patch.js" <<'EOF_TLS_PATCH'
+// Parchea tls.connect para forzar rejectUnauthorized: false
+const tls = require('tls');
+const originalConnect = tls.connect;
+
+tls.connect = function(...args) {
+  let options = args[0];
+  if (options && typeof options === 'object') {
+    options.rejectUnauthorized = false;
+  } else if (typeof options === 'number' || typeof options === 'string') {
+    // tls.connect(port, host, options)
+    const lastArg = args[args.length - 1];
+    if (lastArg && typeof lastArg === 'object') {
+      lastArg.rejectUnauthorized = false;
+    }
+  }
+  return originalConnect.apply(this, args);
+};
+
+// Parchea https.request para forzar rejectUnauthorized: false
+const https = require('https');
+const originalHttpsRequest = https.request;
+https.request = function(...args) {
+  let options = args[0];
+  if (options && typeof options === 'object') {
+    options.rejectUnauthorized = false;
+  }
+  return originalHttpsRequest.apply(this, args);
+};
+EOF_TLS_PATCH
+
+  cat > "$OPENCODE_DIR_GLOBAL/fetch-patch.js" <<'EOF_FETCH_PATCH'
+// Parchea fetch global (undici) para ignorar certificados
+if (typeof globalThis !== 'undefined' && globalThis.fetch) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = function(input, init) {
+    if (!init) init = {};
+    if (typeof init !== 'object') init = {};
+    init.dispatcher = new (require('undici').Agent)({
+      connect: { rejectUnauthorized: false }
+    });
+    return originalFetch.call(globalThis, input, init);
+  };
+}
+EOF_FETCH_PATCH
+
+  local node_opts="--require $OPENCODE_DIR_GLOBAL/tls-patch.js --require $OPENCODE_DIR_GLOBAL/fetch-patch.js"
+
   # Eliminar cualquier symlink o archivo viejo y crear wrapper script fresco
   local target="/usr/local/bin/opencode"
   rm -f "$target"
 
   cat > "$target" <<EOF_OPENCODE
 #!/usr/bin/env bash
-export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
-exec $OPENCODE_BIN "$@"
+export NODE_OPTIONS="$node_opts \${NODE_OPTIONS:-}"
+exec $OPENCODE_BIN "\$@"
 EOF_OPENCODE
   chmod +x "$target"
 
@@ -284,18 +335,18 @@ EOF_OPENCODE
 
   cat > /usr/local/bin/oc-yolo <<EOF_YOLO
 #!/usr/bin/env bash
-export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
-exec opencode --dangerously-skip-permissions "$@"
+export NODE_OPTIONS="$node_opts \${NODE_OPTIONS:-}"
+exec opencode --dangerously-skip-permissions "\$@"
 EOF_YOLO
   chmod +x /usr/local/bin/oc-yolo
   echo "[OK] Alias YOLO disponible en /usr/local/bin/oc-yolo"
 
   cat > /usr/local/bin/oc-web <<EOF_WEB
 #!/usr/bin/env bash
-export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
-exec opencode web --hostname 0.0.0.0 --port "${OPENCODE_WEB_PORT:-4000}" "$@"
+export NODE_OPTIONS="$node_opts \${NODE_OPTIONS:-}"
+exec opencode web --hostname 0.0.0.0 --port "\${OPENCODE_WEB_PORT:-4000}" "\$@"
 EOF_WEB
   chmod +x /usr/local/bin/oc-web
   echo "[OK] Alias web disponible en /usr/local/bin/oc-web"
@@ -877,8 +928,8 @@ User=root
 Group=root
 WorkingDirectory=/root
 Environment=HOME=/root
-Environment=NODE_EXTRA_CA_CERTS=$CA_CERT_PATH
 Environment=NODE_TLS_REJECT_UNAUTHORIZED=0
+Environment=NODE_OPTIONS=--require /usr/local/share/opencode/tls-patch.js --require /usr/local/share/opencode/fetch-patch.js
 Environment=PATH=/usr/local/share/opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/bin/opencode web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
 Restart=always
