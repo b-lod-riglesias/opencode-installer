@@ -52,9 +52,14 @@ read_tty() {
   fi
 
   if [[ -n "$default" ]]; then
-    read -u 3 -er -p "$prompt" -i "$default" val >&2 || true
+    echo -n "$prompt[$default] " >&3
+    read -u 3 -r val || true
+    if [[ -z "$val" ]]; then
+      val="$default"
+    fi
   else
-    read -u 3 -er -p "$prompt" val >&2 || true
+    echo -n "$prompt" >&3
+    read -u 3 -r val || true
   fi
 
   exec 3<&- 2>/dev/null || true
