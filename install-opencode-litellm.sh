@@ -32,24 +32,26 @@ read_tty() {
   local prompt="$1"
   local default="$2"
   local varname="$3"
-  local result
-  local tmp_script
-  tmp_script="$(mktemp)"
+  local value=""
+
   if [[ -n "$default" ]]; then
-    cat > "$tmp_script" <<'EOF_TMP'
-read -er -i "$2" -p "$1" val
-printf '%s' "$val"
-EOF_TMP
-    result="$(bash "$tmp_script" "$prompt" "$default" <"$TTY_IN" >"$TTY_IN" 2>"$TTY_IN")"
+    value="$(bash -c '
+      exec < /dev/tty
+      read -er -p "$1" -i "$2" val
+      printf "%s\n" "$val"
+    ' _ "$prompt" "$default")"
   else
-    cat > "$tmp_script" <<'EOF_TMP'
-read -er -p "$1" val
-printf '%s' "$val"
-EOF_TMP
-    result="$(bash "$tmp_script" "$prompt" <"$TTY_IN" >"$TTY_IN" 2>"$TTY_IN")"
+    value="$(bash -c '
+      exec < /dev/tty
+      read -er -p "$1" val
+      printf "%s\n" "$val"
+    ' _ "$prompt")"
   fi
-  rm -f "$tmp_script"
-  printf -v "$varname" '%s' "$result"
+
+  # Quitar newline final que añade printf
+  value="${value%$'\n'}"
+
+  printf -v "$varname" '%s' "$value"
 }
 
 install_dependency() {
