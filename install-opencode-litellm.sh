@@ -219,19 +219,18 @@ expose_opencode_command() {
     exit 1
   fi
 
-  local target="/usr/local/bin/opencode"
-
-  if [[ "$OPENCODE_BIN" != "$target" ]]; then
-    if [[ -L "$target" ]] && [[ ! -e "$target" ]]; then
-      rm -f "$target"
-    fi
-    ln -sf "$OPENCODE_BIN" "$target"
-  fi
+  # Wrapper principal: desactiva verificación SSL para entornos con proxy MITM/self-signed
+  cat > /usr/local/bin/opencode <<'EOF_OPENCODE'
+#!/usr/bin/env bash
+export NODE_TLS_REJECT_UNAUTHORIZED=0
+exec /usr/local/share/opencode/bin/opencode "$@"
+EOF_OPENCODE
+  chmod +x /usr/local/bin/opencode
 
   if ! command -v opencode >/dev/null 2>&1; then
     echo "[ERROR] No pude dejar opencode disponible en PATH."
     echo "        Binario detectado: $OPENCODE_BIN"
-    echo "        Enlace esperado: $target"
+    echo "        Wrapper esperado: /usr/local/bin/opencode"
     exit 1
   fi
 
@@ -242,6 +241,7 @@ expose_opencode_command() {
 
   cat > /usr/local/bin/oc-yolo <<'EOF_YOLO'
 #!/usr/bin/env bash
+export NODE_TLS_REJECT_UNAUTHORIZED=0
 exec opencode --dangerously-skip-permissions "$@"
 EOF_YOLO
   chmod +x /usr/local/bin/oc-yolo
@@ -249,6 +249,7 @@ EOF_YOLO
 
   cat > /usr/local/bin/oc-web <<'EOF_WEB'
 #!/usr/bin/env bash
+export NODE_TLS_REJECT_UNAUTHORIZED=0
 exec opencode web --hostname 0.0.0.0 --port "${OPENCODE_WEB_PORT:-4000}" "$@"
 EOF_WEB
   chmod +x /usr/local/bin/oc-web
@@ -645,6 +646,7 @@ User=root
 Group=root
 WorkingDirectory=/root
 Environment=HOME=/root
+Environment=NODE_TLS_REJECT_UNAUTHORIZED=0
 Environment=PATH=/usr/local/share/opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=${OPENCODE_BIN} web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
 Restart=always
