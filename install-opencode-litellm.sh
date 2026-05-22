@@ -23,26 +23,33 @@ ensure_root() {
 
 need_tty() {
   if [[ ! -r "$TTY_IN" || ! -w "$TTY_IN" ]]; then
-    echo "[ERROR] Este instalador necesita entrada interactiva (TTY) para pedir Base URL y API key."
+    echo "[ERROR] Este instalador necesita entrada interactiva (TTY)."
     exit 1
   fi
 }
 
-read_input() {
+read_tty() {
   local prompt="$1"
-  local varname="$2"
-  local value=""
-  IFS= read -r -p "$prompt" value < "$TTY_IN"
-  printf -v "$varname" '%s' "$value"
-}
-
-read_secret() {
-  local prompt="$1"
-  local varname="$2"
-  local value=""
-  IFS= read -r -s -p "$prompt" value < "$TTY_IN"
-  echo
-  printf -v "$varname" '%s' "$value"
+  local default="$2"
+  local varname="$3"
+  local result
+  local tmp_script
+  tmp_script="$(mktemp)"
+  if [[ -n "$default" ]]; then
+    cat > "$tmp_script" <<'EOF_TMP'
+read -er -i "$2" -p "$1" val
+printf '%s' "$val"
+EOF_TMP
+    result="$(bash "$tmp_script" "$prompt" "$default" <"$TTY_IN" >"$TTY_IN" 2>"$TTY_IN")"
+  else
+    cat > "$tmp_script" <<'EOF_TMP'
+read -er -p "$1" val
+printf '%s' "$val"
+EOF_TMP
+    result="$(bash "$tmp_script" "$prompt" <"$TTY_IN" >"$TTY_IN" 2>"$TTY_IN")"
+  fi
+  rm -f "$tmp_script"
+  printf -v "$varname" '%s' "$result"
 }
 
 install_dependency() {
@@ -186,13 +193,11 @@ install_opencode() {
     exit 1
   fi
 
-  # Limpiar symlink roto previo en /usr/local/bin si existe
   local global_link="/usr/local/bin/opencode"
   if [[ -L "$global_link" ]] && [[ ! -e "$global_link" ]]; then
     rm -f "$global_link"
   fi
 
-  # Mover la instalación a una ruta global legible por cualquier usuario
   rm -rf "$OPENCODE_DIR_GLOBAL"
   mkdir -p "$(dirname "$OPENCODE_DIR_GLOBAL")"
   local src_dir
@@ -214,9 +219,7 @@ expose_opencode_command() {
 
   local target="/usr/local/bin/opencode"
 
-  # Evitar symlink ciclico: si OPENCODE_BIN ya es el target, no recrearlo
   if [[ "$OPENCODE_BIN" != "$target" ]]; then
-    # Si el target es un symlink roto, eliminarlo
     if [[ -L "$target" ]] && [[ ! -e "$target" ]]; then
       rm -f "$target"
     fi
@@ -316,17 +319,15 @@ repair_known_certificate_baseurl() {
 
     local fallback_url=""
 
-    # Primero probamos con el hostname:4000 para mantener resolucion DNS dinamica
-    if curl -sS --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${EXISTING_API_KEY:-fake}" "http://lllm.cpd.local:4000/v1/models" 2>/dev/null | grep -q '^200$'; then
+    if curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${EXISTING_API_KEY:-fake}" "http://lllm.cpd.local:4000/v1/models" 2>/dev/null | grep -q '^200$'; then
       fallback_url="http://lllm.cpd.local:4000/v1"
     else
-      # Fallback por IP resuelta
       local resolved_ip
       resolved_ip="$(resolve_host_ip "lllm.cpd.local")"
       if [[ -n "$resolved_ip" ]]; then
         for port in 4000 8000 8080 3000 80; do
           local test_url="http://${resolved_ip}:${port}/v1"
-          if curl -sS --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${EXISTING_API_KEY:-fake}" "$test_url/models" 2>/dev/null | grep -q '^200$'; then
+          if curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${EXISTING_API_KEY:-fake}" "$test_url/models" 2>/dev/null | grep -q '^200$'; then
             fallback_url="$test_url"
             break
           fi
@@ -380,47 +381,12 @@ parse_base_url() {
   fi
 }
 
-test_litellm_connectivity() {
-  local url="$1"
-  local key="$2"
-  local tmp_json="/tmp/opencode_litellm_models.$$"
-  local status
-  local curl_out
-  local curl_err
-
-  status="$(curl -sS --max-time 20 -o "$tmp_json" -w "%{http_code}" \
-    -H "Authorization: Bearer $key" \
-    "$url" 2>/dev/null || true)"
-
-  if [[ "$status" == "200" ]]; then
-    printf '%s' "$status"
-    return
-  fi
-
-  # Si falló por certificado self-signed (status vacío o 000) y la URL es HTTPS,
-  # intentamos con -k para verificar que la API key y el endpoint existen.
-  if [[ "$url" == https://* ]]; then
-    local insecure_status
-    insecure_status="$(curl -sSk --max-time 20 -o /dev/null -w "%{http_code}" \
-      -H "Authorization: Bearer $key" \
-      "$url" 2>/dev/null || true)"
-    if [[ "$insecure_status" == "200" ]]; then
-      printf 'INSECURE_OK'
-      return
-    fi
-  fi
-
-  printf '%s' "$status"
-}
-
 try_http_fallback() {
   local host="$1"
   local key="$2"
 
-  # Primero probamos con el hostname y puerto 4000 (backend directo detras de nginx proxy manager)
-  # Esto es preferible para que la config use el nombre DNS y no una IP estatica.
   local status
-  status="$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" \
+  status="$(curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer $key" \
     "http://${host}:4000/v1/models" 2>/dev/null || true)"
   if [[ "$status" == "200" ]]; then
@@ -428,7 +394,6 @@ try_http_fallback() {
     return 0
   fi
 
-  # Si el hostname:4000 falla, probamos con la IP resuelta en varios puertos
   local resolved_ip
   resolved_ip="$(resolve_host_ip "$host")"
   if [[ -z "$resolved_ip" ]]; then
@@ -438,7 +403,7 @@ try_http_fallback() {
   local port
   for port in 4000 8000 8080 3000 80; do
     local fallback_url="http://${resolved_ip}:${port}/v1/models"
-    status="$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" \
+    status="$(curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" \
       -H "Authorization: Bearer $key" \
       "$fallback_url" 2>/dev/null || true)"
     if [[ "$status" == "200" ]]; then
@@ -479,7 +444,6 @@ main() {
   ensure_dependency systemctl
   configure_internal_dns
 
-  # Limpiar symlink roto previo en /usr/local/bin si existe
   local global_link="/usr/local/bin/opencode"
   if [[ -L "$global_link" ]] && [[ ! -e "$global_link" ]]; then
     rm -f "$global_link"
@@ -489,7 +453,6 @@ main() {
     local path_bin=""
     if command -v opencode >/dev/null 2>&1; then
       path_bin="$(command -v opencode)"
-      # Verificar que no sea un symlink roto
       if [[ -x "$path_bin" ]]; then
         OPENCODE_BIN="$path_bin"
       else
@@ -509,7 +472,7 @@ main() {
     if [[ -n "$EXISTING_BASE_URL" ]]; then
       echo "[INFO] Base URL actual: $EXISTING_BASE_URL"
     fi
-    read_input "[1/1] Quieres modificar la configuración existente? [s/N]: " MODIFY_EXISTING_CONFIG
+    read_tty "¿Quieres modificar la configuración existente? [s/N]: " "n" MODIFY_EXISTING_CONFIG
     MODIFY_EXISTING_CONFIG="${MODIFY_EXISTING_CONFIG:-n}"
     if [[ ! "$MODIFY_EXISTING_CONFIG" =~ ^([sS]|[sS][iI]|[yY]|[yY][eE][sS])$ ]]; then
       echo "[INFO] Configuración intacta. Solo se aplicaron DNS, binario global y alias."
@@ -528,38 +491,24 @@ main() {
     fi
   fi
 
-  read_input "[1/6] Base URL de LiteLLM [http://lllm.cpd.local/v1]: " LITELLM_BASE_URL
-  LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local/v1}"
+  read_tty "Base URL de LiteLLM [https://lllm.cpd.local/v1]: " "https://lllm.cpd.local/v1" LITELLM_BASE_URL
+  LITELLM_BASE_URL="${LITELLM_BASE_URL:-https://lllm.cpd.local/v1}"
   parse_base_url "$LITELLM_BASE_URL"
 
-  # Resolver IP real del host para información y posible fallback
   RESOLVED_IP="$(resolve_host_ip "$LITELLM_HOST")"
   if [[ -n "$RESOLVED_IP" ]]; then
     echo "[INFO] $LITELLM_HOST resuelve a $RESOLVED_IP"
   fi
 
-  read_input "[2/6] IP opcional para forzar ${LITELLM_HOST} en /etc/hosts (normalmente vacío): " LITELLM_IP
-  read_input "[3/6] Puerto donde publicar opencode web [4000]: " OPENCODE_PORT
-  OPENCODE_PORT="${OPENCODE_PORT:-4000}"
-  read_input "[4/6] Dominio a usar en la config [${LITELLM_HOST}]: " LITELLM_DOMAIN
-  LITELLM_DOMAIN="${LITELLM_DOMAIN:-$LITELLM_HOST}"
-  read_input "[5/6] Levantar opencode web como servicio persistente? [S/n]: " INSTALL_SERVICE
-  INSTALL_SERVICE="${INSTALL_SERVICE:-s}"
-  read_secret "[6/6] API Key de LiteLLM: " API_KEY
+  OPENCODE_PORT="4000"
+  LITELLM_DOMAIN="$LITELLM_HOST"
+  INSTALL_SERVICE="n"
+
+  read_tty "API Key de LiteLLM: " "" API_KEY
 
   if [[ -z "$API_KEY" ]]; then
     echo "[ERROR] La clave API no puede quedar vacía."
     exit 1
-  fi
-
-  if [[ -n "${LITELLM_IP:-}" ]]; then
-    echo "[INFO] Configurando resolución local de $LITELLM_DOMAIN -> $LITELLM_IP en /etc/hosts"
-    sed -i "/[[:space:]]\\b${LITELLM_DOMAIN}\\b/d" /etc/hosts
-    echo "$LITELLM_IP $LITELLM_DOMAIN" >> /etc/hosts
-  else
-    if [[ -z "$RESOLVED_IP" ]]; then
-      echo "[WARN] $LITELLM_HOST no resuelve por DNS. Si falla la prueba, repite indicando una IP para /etc/hosts."
-    fi
   fi
 
   if [[ "$SCHEME" == "http" && "$LITELLM_PORT" == "80" ]]; then
@@ -574,32 +523,46 @@ main() {
   echo "[CHECK] Probando conectividad y clave API contra $MODELS_URL ..."
   TMP_JSON="/tmp/opencode_litellm_models.$$"
 
-  HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
+  HTTP_STATUS="$(curl -sSL --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
     -H "Authorization: Bearer $API_KEY" \
     "$MODELS_URL" 2>/dev/null || true)"
 
-  # Si falló por SSL o certificado y la URL es HTTPS, intentamos con -k para verificar
-  if [[ "$HTTP_STATUS" != "200" && "$API_BASE_URL" == https://* ]]; then
-    local insecure_status
-    insecure_status="$(curl -sSk --max-time 20 -o /dev/null -w "%{http_code}" \
+  # Si falla, comprobar si es por certificado SSL self-signed
+  if [[ "$HTTP_STATUS" != "200" ]]; then
+    local curl_exit=0
+    curl -sSL --max-time 20 -o /dev/null \
       -H "Authorization: Bearer $API_KEY" \
-      "$MODELS_URL" 2>/dev/null || true)"
-    if [[ "$insecure_status" == "200" ]]; then
-      echo "[WARN] El endpoint HTTPS responde pero tiene un certificado no válido/self-signed."
-      echo "[INFO] opencode puede fallar con ese certificado. Buscando backend HTTP directo..."
-      local fallback
-      if fallback="$(try_http_fallback "$LITELLM_HOST" "$API_KEY")"; then
-        API_BASE_URL="$fallback"
-        MODELS_URL="$API_BASE_URL/models"
-        echo "[OK] Backend HTTP directo encontrado: $API_BASE_URL"
-        # Rehacemos la petición contra el fallback para guardar la respuesta en TMP_JSON
-        HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
-          -H "Authorization: Bearer $API_KEY" \
-          "$MODELS_URL" 2>/dev/null || true)"
-      else
-        echo "[WARN] No encontré backend HTTP directo. Usaré la URL HTTPS original."
-        echo "[INFO] Si opencode falla por el certificado, instala el certificado CA o usa una URL HTTP directa."
+      "$MODELS_URL" 2>/dev/null || curl_exit=$?
+
+    # Exit codes comunes de error SSL en curl: 35, 51, 58, 60, 77, 80, 82
+    if [[ "$curl_exit" -eq 35 || "$curl_exit" -eq 51 || "$curl_exit" -eq 58 || "$curl_exit" -eq 60 || "$curl_exit" -eq 77 || "$curl_exit" -eq 80 || "$curl_exit" -eq 82 ]]; then
+      echo "[WARN] Certificado SSL no válido/self-signed detectado."
+      local insecure_status
+      insecure_status="$(curl -sSLk --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
+        -H "Authorization: Bearer $API_KEY" \
+        "$MODELS_URL" 2>/dev/null || true)"
+      if [[ "$insecure_status" == "200" ]]; then
+        HTTP_STATUS="200"
+        echo "[OK] Conexión verificada ignorando certificado (solo para prueba)."
+        if [[ "$API_BASE_URL" == http://* ]]; then
+          API_BASE_URL="${API_BASE_URL/http:/https:}"
+          MODELS_URL="$API_BASE_URL/models"
+          echo "[INFO] El proxy redirige a HTTPS. Actualizando Base URL a $API_BASE_URL"
+        fi
       fi
+    fi
+  fi
+
+  # Si aun asi no es 200, probar fallback HTTP directo al backend
+  if [[ "$HTTP_STATUS" != "200" ]]; then
+    local fallback
+    if fallback="$(try_http_fallback "$LITELLM_HOST" "$API_KEY")"; then
+      API_BASE_URL="$fallback"
+      MODELS_URL="$API_BASE_URL/models"
+      echo "[OK] Backend HTTP directo encontrado: $API_BASE_URL"
+      HTTP_STATUS="$(curl -sSL --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
+        -H "Authorization: Bearer $API_KEY" \
+        "$MODELS_URL" 2>/dev/null || true)"
     fi
   fi
 
@@ -663,7 +626,6 @@ main() {
     }' > "$JSON_CONF"
   cp "$JSON_CONF" "$JSONC_CONF"
 
-  # Copiar config al usuario que llamó con sudo, si aplica
   copy_config_to_sudo_user
 
   SERVICE_SUMMARY="no configurado"
