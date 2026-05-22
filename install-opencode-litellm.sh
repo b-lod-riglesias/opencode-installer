@@ -36,12 +36,13 @@ read_tty() {
   tmpfile="$(mktemp)"
 
   (
-    exec < /dev/tty
+    # Redirigir los 3 descriptores al TTY real para que readline (read -e) funcione
+    exec </dev/tty >/dev/tty 2>/dev/tty
     local val=""
     if [[ -n "$default" ]]; then
-      read -er -p "$prompt" -i "$default" val
+      read -er -p "$prompt" -i "$default" val || true
     else
-      read -er -p "$prompt" val
+      read -er -p "$prompt" val || true
     fi
     printf '%s' "$val" > "$tmpfile"
   )
@@ -513,6 +514,9 @@ main() {
     echo "[ERROR] La clave API no puede quedar vacía."
     exit 1
   fi
+
+  local masked_key="${API_KEY:0:4}****${API_KEY: -4}"
+  echo "[INFO] API Key capturada: $masked_key"
 
   if [[ "$SCHEME" == "http" && "$LITELLM_PORT" == "80" ]]; then
     API_BASE_URL="$SCHEME://$LITELLM_DOMAIN/v1"
