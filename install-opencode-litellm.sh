@@ -220,18 +220,35 @@ expose_opencode_command() {
     exit 1
   fi
 
-  # Wrapper principal: desactiva verificación SSL para entornos con proxy MITM/self-signed
-  cat > /usr/local/bin/opencode <<'EOF_OPENCODE'
+  # Siempre copiar a ruta global para evitar depender de /root/.opencode
+  if [[ "$OPENCODE_BIN" != "$OPENCODE_DIR_GLOBAL/bin/opencode" ]]; then
+    echo "[INFO] Copiando opencode a $OPENCODE_DIR_GLOBAL ..."
+    rm -rf "$OPENCODE_DIR_GLOBAL"
+    mkdir -p "$OPENCODE_DIR_GLOBAL"
+    local src_dir
+    src_dir="$(dirname "$(dirname "$OPENCODE_BIN")")"
+    cp -a "$src_dir"/* "$OPENCODE_DIR_GLOBAL/"
+    chmod -R a+rX "$OPENCODE_DIR_GLOBAL"
+    chmod +x "$OPENCODE_DIR_GLOBAL/bin/opencode" 2>/dev/null || true
+    OPENCODE_BIN="$OPENCODE_DIR_GLOBAL/bin/opencode"
+    echo "[OK] opencode copiado a $OPENCODE_BIN"
+  fi
+
+  # Eliminar cualquier symlink o archivo viejo y crear wrapper script fresco
+  local target="/usr/local/bin/opencode"
+  rm -f "$target"
+
+  cat > "$target" <<'EOF_OPENCODE'
 #!/usr/bin/env bash
 export NODE_TLS_REJECT_UNAUTHORIZED=0
 exec /usr/local/share/opencode/bin/opencode "$@"
 EOF_OPENCODE
-  chmod +x /usr/local/bin/opencode
+  chmod +x "$target"
 
   if ! command -v opencode >/dev/null 2>&1; then
     echo "[ERROR] No pude dejar opencode disponible en PATH."
     echo "        Binario detectado: $OPENCODE_BIN"
-    echo "        Wrapper esperado: /usr/local/bin/opencode"
+    echo "        Wrapper esperado: $target"
     exit 1
   fi
 
