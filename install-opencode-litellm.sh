@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+
+# Si se ejecuta via pipe (curl | bash), auto-descargar a un archivo temporal
+# y re-ejecutar con stdin desde /dev/tty para que la entrada interactiva funcione.
+if [[ ! -t 0 ]]; then
+  tmpfile="$(mktemp)"
+  cat > "$tmpfile"
+  chmod +x "$tmpfile"
+  exec bash "$tmpfile" "$@" </dev/tty
+fi
+
 set -euo pipefail
 
 OPENCODE_DIR_GLOBAL="/usr/local/share/opencode"
