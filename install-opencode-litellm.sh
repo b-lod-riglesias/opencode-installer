@@ -241,18 +241,21 @@ expose_opencode_command() {
     exit 1
   fi
 
-  # Siempre copiar a ruta global para evitar depender de /root/.opencode
+  # Intentar copiar a ruta global; si falla, usar el binario detectado directamente
   if [[ "$OPENCODE_BIN" != "$OPENCODE_DIR_GLOBAL/bin/opencode" ]]; then
     echo "[INFO] Copiando opencode a $OPENCODE_DIR_GLOBAL ..."
     rm -rf "$OPENCODE_DIR_GLOBAL"
     mkdir -p "$OPENCODE_DIR_GLOBAL"
     local src_dir
     src_dir="$(dirname "$(dirname "$OPENCODE_BIN")")"
-    cp -a "$src_dir"/* "$OPENCODE_DIR_GLOBAL/"
-    chmod -R a+rX "$OPENCODE_DIR_GLOBAL"
-    chmod +x "$OPENCODE_DIR_GLOBAL/bin/opencode" 2>/dev/null || true
-    OPENCODE_BIN="$OPENCODE_DIR_GLOBAL/bin/opencode"
-    echo "[OK] opencode copiado a $OPENCODE_BIN"
+    if cp -a "$src_dir"/* "$OPENCODE_DIR_GLOBAL/" 2>/dev/null; then
+      chmod -R a+rX "$OPENCODE_DIR_GLOBAL"
+      chmod +x "$OPENCODE_DIR_GLOBAL/bin/opencode" 2>/dev/null || true
+      OPENCODE_BIN="$OPENCODE_DIR_GLOBAL/bin/opencode"
+      echo "[OK] opencode copiado a $OPENCODE_BIN"
+    else
+      echo "[WARN] No pude copiar a $OPENCODE_DIR_GLOBAL. Usando binario original: $OPENCODE_BIN"
+    fi
   fi
 
   # Eliminar cualquier symlink o archivo viejo y crear wrapper script fresco
@@ -261,9 +264,8 @@ expose_opencode_command() {
 
   cat > "$target" <<EOF_OPENCODE
 #!/usr/bin/env bash
-export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
-exec /usr/local/share/opencode/bin/opencode "$@"
+exec $OPENCODE_BIN "$@"
 EOF_OPENCODE
   chmod +x "$target"
 
@@ -281,7 +283,6 @@ EOF_OPENCODE
 
   cat > /usr/local/bin/oc-yolo <<EOF_YOLO
 #!/usr/bin/env bash
-export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
 exec opencode --dangerously-skip-permissions "$@"
 EOF_YOLO
@@ -290,7 +291,6 @@ EOF_YOLO
 
   cat > /usr/local/bin/oc-web <<EOF_WEB
 #!/usr/bin/env bash
-export NODE_EXTRA_CA_CERTS="$CA_CERT_PATH"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
 exec opencode web --hostname 0.0.0.0 --port "${OPENCODE_WEB_PORT:-4000}" "$@"
 EOF_WEB
@@ -637,7 +637,8 @@ main() {
   ensure_dependency jq
   ensure_dependency systemctl
   configure_internal_dns
-  install_ca_certificate
+  # install_ca_certificate omitido: el certificado incluido no es CA raíz.
+  # Se usa NODE_TLS_REJECT_UNAUTHORIZED=0 en wrappers como alternativa.
 
   local global_link="/usr/local/bin/opencode"
   if [[ -L "$global_link" ]] && [[ ! -e "$global_link" ]]; then
@@ -845,10 +846,9 @@ User=root
 Group=root
 WorkingDirectory=/root
 Environment=HOME=/root
-Environment=NODE_EXTRA_CA_CERTS=$CA_CERT_PATH
 Environment=NODE_TLS_REJECT_UNAUTHORIZED=0
 Environment=PATH=/usr/local/share/opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=${OPENCODE_BIN} web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
+ExecStart=/usr/local/bin/opencode web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
 Restart=always
 RestartSec=5
 StartLimitInterval=0
