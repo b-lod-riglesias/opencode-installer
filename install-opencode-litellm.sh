@@ -405,15 +405,6 @@ repair_known_certificate_baseurl() {
   local file
   local current_base
   local tmp_file
-  local existing_api_key=""
-
-  # Intentar leer API key de la configuración existente
-  if [[ -s "$JSON_CONF" ]]; then
-    existing_api_key="$(jq -r '.provider.litellm.options.apiKey // empty' "$JSON_CONF" 2>/dev/null || true)"
-  fi
-  if [[ -z "$existing_api_key" ]] && [[ -s "$JSONC_CONF" ]]; then
-    existing_api_key="$(jq -r '.provider.litellm.options.apiKey // empty' "$JSONC_CONF" 2>/dev/null || true)"
-  fi
 
   for file in "$JSON_CONF" "$JSONC_CONF"; do
     if [[ ! -s "$file" ]]; then
@@ -425,33 +416,14 @@ repair_known_certificate_baseurl() {
       continue
     fi
 
-    local fallback_url=""
-
-    if curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${existing_api_key:-fake}" "http://lllm.cpd.local:4000/v1/models" 2>/dev/null | grep -q '^200$'; then
-      fallback_url="http://lllm.cpd.local:4000/v1"
-    else
-      local resolved_ip
-      resolved_ip="$(resolve_host_ip "lllm.cpd.local")"
-      if [[ -n "$resolved_ip" ]]; then
-        for port in 4000 8000 8080 3000 80; do
-          local test_url="http://${resolved_ip}:${port}/v1"
-          if curl -sSL --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${existing_api_key:-fake}" "$test_url/models" 2>/dev/null | grep -q '^200$'; then
-            fallback_url="$test_url"
-            break
-          fi
-        done
-      fi
-    fi
-
-    if [[ -n "$fallback_url" ]]; then
-      echo "[WARN] Detectado $current_base en $file; el proxy usa certificado self-signed."
-      echo "[INFO] Corrigiendo a $fallback_url (HTTP directo)."
+    # Forzar siempre a HTTP directo para evitar certificados self-signed
+    if [[ "$current_base" == https://* ]]; then
+      echo "[WARN] Detectado HTTPS para lllm.cpd.local en $file; forzando a HTTP directo."
       tmp_file="$(mktemp)"
-      jq --arg url "$fallback_url" '.provider.litellm.options.baseURL = $url' "$file" > "$tmp_file"
+      jq '.provider.litellm.options.baseURL = "http://lllm.cpd.local:4000/v1"' "$file" > "$tmp_file"
       cp "$tmp_file" "$file"
       rm -f "$tmp_file"
-    else
-      echo "[WARN] Detectado $current_base en $file; no encontré backend HTTP directo. Deja la URL tal cual."
+      echo "[INFO] Corregido a http://lllm.cpd.local:4000/v1"
     fi
   done
 }
@@ -468,6 +440,15 @@ parse_base_url() {
   BASE_URL_RAW="${BASE_URL_RAW%/}"
   if [[ "$BASE_URL_RAW" != */v1 ]]; then
     BASE_URL_RAW="${BASE_URL_RAW}/v1"
+  fi
+
+  # Forzar HTTP directo al backend para lllm.cpd.local (evita certificados self-signed del proxy)
+  if [[ "$BASE_URL_RAW" == *"lllm.cpd.local"* ]]; then
+    if [[ "$BASE_URL_RAW" == https://* ]]; then
+      echo "[WARN] Detectado HTTPS para lllm.cpd.local; el proxy usa certificado self-signed."
+      echo "[INFO] Forzando conexión HTTP directa al backend: http://lllm.cpd.local:4000/v1"
+    fi
+    BASE_URL_RAW="http://lllm.cpd.local:4000/v1"
   fi
 
   SCHEME="${BASE_URL_RAW%%://*}"
@@ -787,8 +768,8 @@ main() {
     fi
   fi
 
-  read_tty "Base URL de LiteLLM [https://lllm.cpd.local/v1]: " "https://lllm.cpd.local/v1" LITELLM_BASE_URL
-  LITELLM_BASE_URL="${LITELLM_BASE_URL:-https://lllm.cpd.local/v1}"
+  read_tty "Base URL de LiteLLM [http://lllm.cpd.local:4000/v1]: " "http://lllm.cpd.local:4000/v1" LITELLM_BASE_URL
+  LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local:4000/v1}"
   parse_base_url "$LITELLM_BASE_URL"
 
   RESOLVED_IP="$(resolve_host_ip "$LITELLM_HOST")"
