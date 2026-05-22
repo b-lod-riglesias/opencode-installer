@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OPENCODE_BIN="${OPENCODE_BIN:-/root/.opencode/bin/opencode}"
+OPENCODE_DIR_GLOBAL="/usr/local/share/opencode"
+OPENCODE_BIN="${OPENCODE_BIN:-$OPENCODE_DIR_GLOBAL/bin/opencode}"
 CONFIG_DIR="/root/.config/opencode"
 JSON_CONF="$CONFIG_DIR/opencode.json"
 JSONC_CONF="$CONFIG_DIR/opencode.jsonc"
@@ -171,14 +172,34 @@ install_opencode() {
   echo "[INFO] Instalando opencode con el instalador oficial..."
   curl -fsSL https://opencode.ai/install | bash
 
+  local detected_bin=""
   if [[ -x "/root/.opencode/bin/opencode" ]]; then
-    OPENCODE_BIN="/root/.opencode/bin/opencode"
+    detected_bin="/root/.opencode/bin/opencode"
   elif command -v opencode >/dev/null 2>&1; then
-    OPENCODE_BIN="$(command -v opencode)"
-  else
+    detected_bin="$(command -v opencode)"
+  fi
+
+  if [[ -z "$detected_bin" ]]; then
     echo "[ERROR] opencode no quedó instalado o no está en PATH."
     exit 1
   fi
+
+  # Mover la instalación a una ruta global legible por cualquier usuario
+  rm -rf "$OPENCODE_DIR_GLOBAL"
+  mkdir -p "$(dirname "$OPENCODE_DIR_GLOBAL")"
+  if [[ -d "/root/.opencode" ]]; then
+    cp -a /root/.opencode "$OPENCODE_DIR_GLOBAL"
+  elif [[ -d "$HOME/.opencode" ]]; then
+    cp -a "$HOME/.opencode" "$OPENCODE_DIR_GLOBAL"
+  else
+    # Fallback: buscar el directorio .opencode del detected_bin
+    local opencode_dir
+    opencode_dir="$(dirname "$(dirname "$detected_bin")")"
+    cp -a "$opencode_dir" "$OPENCODE_DIR_GLOBAL"
+  fi
+
+  chmod -R a+rX "$OPENCODE_DIR_GLOBAL"
+  OPENCODE_BIN="$OPENCODE_DIR_GLOBAL/bin/opencode"
 
   echo "[OK] opencode instalado en $OPENCODE_BIN"
 }
@@ -189,9 +210,7 @@ expose_opencode_command() {
     exit 1
   fi
 
-  if [[ "$OPENCODE_BIN" != "/usr/local/bin/opencode" ]]; then
-    ln -sf "$OPENCODE_BIN" /usr/local/bin/opencode
-  fi
+  ln -sf "$OPENCODE_BIN" /usr/local/bin/opencode
 
   if ! command -v opencode >/dev/null 2>&1; then
     echo "[ERROR] No pude dejar opencode disponible en PATH."
@@ -203,12 +222,7 @@ expose_opencode_command() {
   OPENCODE_CMD="$(command -v opencode)"
   echo "[OK] Comando opencode disponible en $OPENCODE_CMD"
 
-  if [[ -f /usr/local/bin/opencode-yolo ]] && grep -q "dangerously-skip-permissions" /usr/local/bin/opencode-yolo; then
-    rm -f /usr/local/bin/opencode-yolo
-  fi
-  if [[ -f /usr/local/bin/opencode-web ]] && grep -q "opencode web --hostname" /usr/local/bin/opencode-web; then
-    rm -f /usr/local/bin/opencode-web
-  fi
+  rm -f /usr/local/bin/opencode-yolo /usr/local/bin/opencode-web
 
   cat > /usr/local/bin/oc-yolo <<'EOF_YOLO'
 #!/usr/bin/env bash
@@ -251,6 +265,29 @@ is_opencode_configured() {
   [[ -n "$EXISTING_CONFIG_ITEMS" ]]
 }
 
+resolve_host_ip() {
+  local host="$1"
+  local ip=""
+
+  if command -v getent >/dev/null 2>&1; then
+    ip="$(getent hosts "$host" 2>/dev/null | awk '{print $1}' | head -n 1)"
+  fi
+
+  if [[ -z "$ip" ]] && command -v dig >/dev/null 2>&1; then
+    ip="$(dig +short "$host" 2>/dev/null | head -n 1)"
+  fi
+
+  if [[ -z "$ip" ]] && command -v host >/dev/null 2>&1; then
+    ip="$(host -t A "$host" 2>/dev/null | awk '/has address/ {print $NF; exit}')"
+  fi
+
+  if [[ -z "$ip" ]] && command -v nslookup >/dev/null 2>&1; then
+    ip="$(nslookup "$host" 2>/dev/null | awk '/^Address: / {print $2}' | tail -n 1)"
+  fi
+
+  printf '%s' "$ip"
+}
+
 repair_known_certificate_baseurl() {
   local file
   local current_base
@@ -262,16 +299,40 @@ repair_known_certificate_baseurl() {
     fi
 
     current_base="$(jq -r '.provider.litellm.options.baseURL // empty' "$file" 2>/dev/null || true)"
-    case "$current_base" in
-      http://lllm.cpd.local/v1|https://lllm.cpd.local/v1|https://lllm.cpd.local:443/v1)
-        echo "[WARN] Detectado $current_base en $file; el proxy redirige a HTTPS y opencode falla con el certificado."
-        echo "[INFO] Corrigiendo a http://10.20.20.56:4000/v1"
-        tmp_file="$(mktemp)"
-        jq '.provider.litellm.options.baseURL = "http://10.20.20.56:4000/v1"' "$file" > "$tmp_file"
-        cp "$tmp_file" "$file"
-        rm -f "$tmp_file"
-        ;;
-    esac
+    if [[ "$current_base" != *"lllm.cpd.local"* ]]; then
+      continue
+    fi
+
+    local fallback_url=""
+
+    # Primero probamos con el hostname:4000 para mantener resolucion DNS dinamica
+    if curl -sS --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${EXISTING_API_KEY:-fake}" "http://lllm.cpd.local:4000/v1/models" 2>/dev/null | grep -q '^200$'; then
+      fallback_url="http://lllm.cpd.local:4000/v1"
+    else
+      # Fallback por IP resuelta
+      local resolved_ip
+      resolved_ip="$(resolve_host_ip "lllm.cpd.local")"
+      if [[ -n "$resolved_ip" ]]; then
+        for port in 4000 8000 8080 3000 80; do
+          local test_url="http://${resolved_ip}:${port}/v1"
+          if curl -sS --max-time 10 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${EXISTING_API_KEY:-fake}" "$test_url/models" 2>/dev/null | grep -q '^200$'; then
+            fallback_url="$test_url"
+            break
+          fi
+        done
+      fi
+    fi
+
+    if [[ -n "$fallback_url" ]]; then
+      echo "[WARN] Detectado $current_base en $file; el proxy usa certificado self-signed."
+      echo "[INFO] Corrigiendo a $fallback_url (HTTP directo)."
+      tmp_file="$(mktemp)"
+      jq --arg url "$fallback_url" '.provider.litellm.options.baseURL = $url' "$file" > "$tmp_file"
+      cp "$tmp_file" "$file"
+      rm -f "$tmp_file"
+    else
+      echo "[WARN] Detectado $current_base en $file; no encontré backend HTTP directo. Deja la URL tal cual."
+    fi
   done
 }
 
@@ -288,13 +349,6 @@ parse_base_url() {
   if [[ "$BASE_URL_RAW" != */v1 ]]; then
     BASE_URL_RAW="${BASE_URL_RAW}/v1"
   fi
-
-  case "$BASE_URL_RAW" in
-    http://lllm.cpd.local/v1|https://lllm.cpd.local/v1|https://lllm.cpd.local:443/v1)
-      echo "[WARN] lllm.cpd.local redirige a HTTPS y opencode falla con el certificado; usando backend HTTP directo."
-      BASE_URL_RAW="http://10.20.20.56:4000/v1"
-      ;;
-  esac
 
   SCHEME="${BASE_URL_RAW%%://*}"
   REST="${BASE_URL_RAW#*://}"
@@ -313,6 +367,95 @@ parse_base_url() {
       LITELLM_PORT="80"
     fi
   fi
+}
+
+test_litellm_connectivity() {
+  local url="$1"
+  local key="$2"
+  local tmp_json="/tmp/opencode_litellm_models.$$"
+  local status
+  local curl_out
+  local curl_err
+
+  status="$(curl -sS --max-time 20 -o "$tmp_json" -w "%{http_code}" \
+    -H "Authorization: Bearer $key" \
+    "$url" 2>/dev/null || true)"
+
+  if [[ "$status" == "200" ]]; then
+    printf '%s' "$status"
+    return
+  fi
+
+  # Si falló por certificado self-signed (status vacío o 000) y la URL es HTTPS,
+  # intentamos con -k para verificar que la API key y el endpoint existen.
+  if [[ "$url" == https://* ]]; then
+    local insecure_status
+    insecure_status="$(curl -sSk --max-time 20 -o /dev/null -w "%{http_code}" \
+      -H "Authorization: Bearer $key" \
+      "$url" 2>/dev/null || true)"
+    if [[ "$insecure_status" == "200" ]]; then
+      printf 'INSECURE_OK'
+      return
+    fi
+  fi
+
+  printf '%s' "$status"
+}
+
+try_http_fallback() {
+  local host="$1"
+  local key="$2"
+
+  # Primero probamos con el hostname y puerto 4000 (backend directo detras de nginx proxy manager)
+  # Esto es preferible para que la config use el nombre DNS y no una IP estatica.
+  local status
+  status="$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer $key" \
+    "http://${host}:4000/v1/models" 2>/dev/null || true)"
+  if [[ "$status" == "200" ]]; then
+    printf '%s' "http://${host}:4000/v1"
+    return 0
+  fi
+
+  # Si el hostname:4000 falla, probamos con la IP resuelta en varios puertos
+  local resolved_ip
+  resolved_ip="$(resolve_host_ip "$host")"
+  if [[ -z "$resolved_ip" ]]; then
+    return 1
+  fi
+
+  local port
+  for port in 4000 8000 8080 3000 80; do
+    local fallback_url="http://${resolved_ip}:${port}/v1/models"
+    status="$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" \
+      -H "Authorization: Bearer $key" \
+      "$fallback_url" 2>/dev/null || true)"
+    if [[ "$status" == "200" ]]; then
+      printf '%s' "http://${resolved_ip}:${port}/v1"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+copy_config_to_sudo_user() {
+  local target_user="${SUDO_USER:-}"
+  if [[ -z "$target_user" ]]; then
+    return
+  fi
+
+  local target_home
+  target_home="$(getent passwd "$target_user" | cut -d: -f6)"
+  if [[ -z "$target_home" || ! -d "$target_home" ]]; then
+    return
+  fi
+
+  local target_config_dir="$target_home/.config/opencode"
+  mkdir -p "$target_config_dir"
+  cp -a "$JSON_CONF" "$JSONC_CONF" "$target_config_dir/" 2>/dev/null || true
+  chown -R "$target_user:$(id -gn "$target_user" 2>/dev/null || echo "$target_user")" "$target_config_dir" 2>/dev/null || true
+  echo "[INFO] Configuración copiada a $target_config_dir para el usuario $target_user."
 }
 
 main() {
@@ -364,6 +507,12 @@ main() {
   LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local/v1}"
   parse_base_url "$LITELLM_BASE_URL"
 
+  # Resolver IP real del host para información y posible fallback
+  RESOLVED_IP="$(resolve_host_ip "$LITELLM_HOST")"
+  if [[ -n "$RESOLVED_IP" ]]; then
+    echo "[INFO] $LITELLM_HOST resuelve a $RESOLVED_IP"
+  fi
+
   read_input "[2/6] IP opcional para forzar ${LITELLM_HOST} en /etc/hosts (normalmente vacío): " LITELLM_IP
   read_input "[3/6] Puerto donde publicar opencode web [4000]: " OPENCODE_PORT
   OPENCODE_PORT="${OPENCODE_PORT:-4000}"
@@ -380,13 +529,10 @@ main() {
 
   if [[ -n "${LITELLM_IP:-}" ]]; then
     echo "[INFO] Configurando resolución local de $LITELLM_DOMAIN -> $LITELLM_IP en /etc/hosts"
-    sed -i "/[[:space:]]\b${LITELLM_DOMAIN}\b/d" /etc/hosts
+    sed -i "/[[:space:]]\\b${LITELLM_DOMAIN}\\b/d" /etc/hosts
     echo "$LITELLM_IP $LITELLM_DOMAIN" >> /etc/hosts
   else
-    if getent hosts "$LITELLM_HOST" >/dev/null 2>&1; then
-      RESOLVED_IP="$(getent hosts "$LITELLM_HOST" | awk '{print $1}' | head -n 1)"
-      echo "[OK] $LITELLM_HOST resuelve por DNS a $RESOLVED_IP"
-    else
+    if [[ -z "$RESOLVED_IP" ]]; then
       echo "[WARN] $LITELLM_HOST no resuelve por DNS. Si falla la prueba, repite indicando una IP para /etc/hosts."
     fi
   fi
@@ -402,18 +548,34 @@ main() {
 
   echo "[CHECK] Probando conectividad y clave API contra $MODELS_URL ..."
   TMP_JSON="/tmp/opencode_litellm_models.$$"
+
   HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
     -H "Authorization: Bearer $API_KEY" \
-    "$MODELS_URL")"
+    "$MODELS_URL" 2>/dev/null || true)"
 
-  if [[ "$HTTP_STATUS" =~ ^30[1278]$ && "$API_BASE_URL" == "http://lllm.cpd.local/v1" ]]; then
-    echo "[WARN] $API_BASE_URL redirige a HTTPS; opencode no maneja bien ese proxy con certificado self-signed."
-    API_BASE_URL="http://10.20.20.56:4000/v1"
-    MODELS_URL="$API_BASE_URL/models"
-    echo "[INFO] Reintentando contra backend directo: $MODELS_URL"
-    HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
+  # Si falló por SSL o certificado y la URL es HTTPS, intentamos con -k para verificar
+  if [[ "$HTTP_STATUS" != "200" && "$API_BASE_URL" == https://* ]]; then
+    local insecure_status
+    insecure_status="$(curl -sSk --max-time 20 -o /dev/null -w "%{http_code}" \
       -H "Authorization: Bearer $API_KEY" \
-      "$MODELS_URL")"
+      "$MODELS_URL" 2>/dev/null || true)"
+    if [[ "$insecure_status" == "200" ]]; then
+      echo "[WARN] El endpoint HTTPS responde pero tiene un certificado no válido/self-signed."
+      echo "[INFO] opencode puede fallar con ese certificado. Buscando backend HTTP directo..."
+      local fallback
+      if fallback="$(try_http_fallback "$LITELLM_HOST" "$API_KEY")"; then
+        API_BASE_URL="$fallback"
+        MODELS_URL="$API_BASE_URL/models"
+        echo "[OK] Backend HTTP directo encontrado: $API_BASE_URL"
+        # Rehacemos la petición contra el fallback para guardar la respuesta en TMP_JSON
+        HTTP_STATUS="$(curl -sS --max-time 20 -o "$TMP_JSON" -w "%{http_code}" \
+          -H "Authorization: Bearer $API_KEY" \
+          "$MODELS_URL" 2>/dev/null || true)"
+      else
+        echo "[WARN] No encontré backend HTTP directo. Usaré la URL HTTPS original."
+        echo "[INFO] Si opencode falla por el certificado, instala el certificado CA o usa una URL HTTP directa."
+      fi
+    fi
   fi
 
   if [[ "$HTTP_STATUS" != "200" ]]; then
@@ -476,6 +638,9 @@ main() {
     }' > "$JSON_CONF"
   cp "$JSON_CONF" "$JSONC_CONF"
 
+  # Copiar config al usuario que llamó con sudo, si aplica
+  copy_config_to_sudo_user
+
   SERVICE_SUMMARY="no configurado"
   if [[ "$INSTALL_SERVICE" =~ ^([sS]|[sS][iI]|[yY]|[yY][eE][sS])$ ]]; then
     echo "[INFO] Generando servicio systemd: $SERVICE_PATH"
@@ -491,7 +656,7 @@ User=root
 Group=root
 WorkingDirectory=/root
 Environment=HOME=/root
-Environment=PATH=/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/usr/local/share/opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=${OPENCODE_BIN} web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
 Restart=always
 RestartSec=5
