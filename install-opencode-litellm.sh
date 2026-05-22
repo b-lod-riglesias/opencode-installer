@@ -8,7 +8,18 @@ JSON_CONF="$CONFIG_DIR/opencode.json"
 JSONC_CONF="$CONFIG_DIR/opencode.jsonc"
 SERVICE_NAME="opencode-web.service"
 SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
+REFRESH_SERVICE="opencode-refresh-models.service"
+REFRESH_TIMER="opencode-refresh-models.timer"
+REFRESH_SERVICE_PATH="/etc/systemd/system/$REFRESH_SERVICE"
+REFRESH_TIMER_PATH="/etc/systemd/system/$REFRESH_TIMER"
 TTY_IN="${TTY:-/dev/tty}"
+
+REFRESH_MODE="${1:-}"
+if [[ "$REFRESH_MODE" == "--refresh" || "$REFRESH_MODE" == "-r" ]]; then
+  REFRESH_MODE="1"
+else
+  REFRESH_MODE=""
+fi
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1
@@ -455,7 +466,131 @@ copy_config_to_sudo_user() {
   echo "[INFO] Configuración copiada a $target_config_dir para el usuario $target_user."
 }
 
+fetch_and_update_models() {
+  local baseurl="$1"
+  local apikey="$2"
+  local models_url="$baseurl/models"
+  local tmp_json="/tmp/opencode_litellm_refresh.$$"
+
+  echo "[INFO] Refrescando lista de modelos desde $models_url ..."
+
+  local status
+  status="$(curl -sSLk --max-time 20 -o "$tmp_json" -w "%{http_code}" \
+    -H "Authorization: Bearer $apikey" \
+    "$models_url" 2>/dev/null || true)"
+
+  if [[ "$status" != "200" ]]; then
+    echo "[ERROR] No pude conectar al endpoint para refrescar modelos. HTTP=$status"
+    rm -f "$tmp_json"
+    return 1
+  fi
+
+  if ! jq empty "$tmp_json" >/dev/null 2>&1; then
+    echo "[ERROR] La respuesta del endpoint no es JSON válido."
+    rm -f "$tmp_json"
+    return 1
+  fi
+
+  local model_ids_raw
+  model_ids_raw="$(jq -r 'if has("data") then .data[].id elif has("models") then .models[].id else .[]?.id end' "$tmp_json" | sed '/^null$/d' | sort -u)"
+  rm -f "$tmp_json"
+
+  if [[ -z "$model_ids_raw" ]]; then
+    echo "[ERROR] No encontré modelos en la respuesta de /v1/models."
+    return 1
+  fi
+
+  local models_json
+  models_json="$(printf '%s\n' "$model_ids_raw" | jq -Rsc 'split("\n") | map(select(length>0)) | map({(.): {name: .}}) | add')"
+  local default_model
+  default_model="$(printf '%s\n' "$model_ids_raw" | head -n 1)"
+
+  mkdir -p "$CONFIG_DIR"
+
+  for file in "$JSON_CONF" "$JSONC_CONF"; do
+    if [[ ! -s "$file" ]]; then
+      continue
+    fi
+    local tmp_file
+    tmp_file="$(mktemp)"
+    jq --argjson models "$models_json" --arg default_model "$default_model" \
+      '.provider.litellm.models = $models | .model = ("litellm/" + $default_model)' \
+      "$file" > "$tmp_file"
+    cp "$tmp_file" "$file"
+    rm -f "$tmp_file"
+  done
+
+  copy_config_to_sudo_user
+
+  echo "[OK] Modelos actualizados. Modelo por defecto: litellm/$default_model"
+  printf '%s\n' "$model_ids_raw" | sed 's/^/  - /'
+  return 0
+}
+
+refresh_models() {
+  if [[ ! -s "$JSON_CONF" ]]; then
+    echo "[ERROR] No existe configuración de opencode en $JSON_CONF. Ejecuta el instalador primero."
+    exit 1
+  fi
+
+  local baseurl apikey
+  baseurl="$(jq -r '.provider.litellm.options.baseURL // empty' "$JSON_CONF" 2>/dev/null || true)"
+  apikey="$(jq -r '.provider.litellm.options.apiKey // empty' "$JSON_CONF" 2>/dev/null || true)"
+
+  if [[ -z "$baseurl" || -z "$apikey" ]]; then
+    echo "[ERROR] No pude extraer baseURL o apiKey de la configuración existente."
+    exit 1
+  fi
+
+  fetch_and_update_models "$baseurl" "$apikey"
+}
+
+install_refresh_timer() {
+  echo "[INFO] Instalando refresco automático de modelos (diario a las 03:00)..."
+
+  cat > "$REFRESH_SERVICE_PATH" <<EOF_REFRESH_SVC
+[Unit]
+Description=Refrescar modelos de opencode desde LiteLLM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/install-opencode-litellm.sh --refresh
+EOF_REFRESH_SVC
+
+  cat > "$REFRESH_TIMER_PATH" <<EOF_REFRESH_TIMER
+[Unit]
+Description=Timer diario para refrescar modelos de opencode
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+EOF_REFRESH_TIMER
+
+  systemctl daemon-reload
+  systemctl enable --now "$REFRESH_TIMER"
+
+  if systemctl is-active --quiet "$REFRESH_TIMER"; then
+    echo "[OK] Timer de refresco activo: $REFRESH_TIMER"
+  else
+    echo "[WARN] El timer no quedó activo inmediatamente, pero está habilitado."
+  fi
+}
+
 main() {
+  if [[ -n "$REFRESH_MODE" ]]; then
+    refresh_models
+    exit 0
+  fi
+
   ensure_root
   need_tty
   check_cpu
@@ -493,9 +628,13 @@ main() {
     if [[ -n "$EXISTING_BASE_URL" ]]; then
       echo "[INFO] Base URL actual: $EXISTING_BASE_URL"
     fi
-    read_tty "¿Quieres modificar la configuración existente? [s/N]: " "n" MODIFY_EXISTING_CONFIG
+    read_tty "¿Refrescar modelos [r], modificar config [s], o salir [N]? " "n" MODIFY_EXISTING_CONFIG
     MODIFY_EXISTING_CONFIG="${MODIFY_EXISTING_CONFIG:-n}"
-    if [[ ! "$MODIFY_EXISTING_CONFIG" =~ ^([sS]|[sS][iI]|[yY]|[yY][eE][sS])$ ]]; then
+    if [[ "$MODIFY_EXISTING_CONFIG" =~ ^([rR])$ ]]; then
+      refresh_models
+      echo "[INFO] Refresco completado."
+      exit 0
+    elif [[ ! "$MODIFY_EXISTING_CONFIG" =~ ^([sS]|[sS][iI]|[yY]|[yY][eE][sS])$ ]]; then
       echo "[INFO] Configuración intacta. Solo se aplicaron DNS, binario global y alias."
       echo
       printf '[FINAL] Arreglos aplicados sin modificar config:\n'
@@ -699,6 +838,15 @@ EOF_SERVICE
     fi
     echo "[INFO] Servicio persistente omitido. Puedes levantarlo manualmente con: oc-web"
   fi
+
+  # Copiar el propio script a /usr/local/bin para que el timer de refresco lo encuentre
+  if [[ -f "$0" ]] && [[ "$0" != "/usr/local/bin/install-opencode-litellm.sh" ]]; then
+    cp -f "$0" /usr/local/bin/install-opencode-litellm.sh
+    chmod +x /usr/local/bin/install-opencode-litellm.sh
+    echo "[INFO] Script copiado a /usr/local/bin/install-opencode-litellm.sh"
+  fi
+
+  install_refresh_timer
 
   echo
   printf '[FINAL] Instalado y activo con:\n'
