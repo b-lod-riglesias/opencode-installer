@@ -433,15 +433,8 @@ repair_known_certificate_baseurl() {
       continue
     fi
 
-    # Forzar siempre a HTTP directo para evitar certificados self-signed
-    if [[ "$current_base" == https://* ]]; then
-      echo "[WARN] Detectado HTTPS para lllm.cpd.local en $file; forzando a HTTP directo."
-      tmp_file="$(mktemp)"
-      jq '.provider.litellm.options.baseURL = "http://lllm.cpd.local:4000/v1"' "$file" > "$tmp_file"
-      cp "$tmp_file" "$file"
-      rm -f "$tmp_file"
-      echo "[INFO] Corregido a http://lllm.cpd.local:4000/v1"
-    fi
+    # Ya no forzamos HTTP; mantenemos la URL tal cual (HTTPS al proxy)
+    # Las medidas de bypass de certificados están en los wrappers y LD_PRELOAD
   done
 }
 
@@ -457,15 +450,6 @@ parse_base_url() {
   BASE_URL_RAW="${BASE_URL_RAW%/}"
   if [[ "$BASE_URL_RAW" != */v1 ]]; then
     BASE_URL_RAW="${BASE_URL_RAW}/v1"
-  fi
-
-  # Forzar HTTP directo al backend para lllm.cpd.local (evita certificados self-signed del proxy)
-  if [[ "$BASE_URL_RAW" == *"lllm.cpd.local"* ]]; then
-    if [[ "$BASE_URL_RAW" == https://* ]]; then
-      echo "[WARN] Detectado HTTPS para lllm.cpd.local; el proxy usa certificado self-signed."
-      echo "[INFO] Forzando conexión HTTP directa al backend: http://lllm.cpd.local:4000/v1"
-    fi
-    BASE_URL_RAW="http://lllm.cpd.local:4000/v1"
   fi
 
   SCHEME="${BASE_URL_RAW%%://*}"
@@ -785,8 +769,8 @@ main() {
     fi
   fi
 
-  read_tty "Base URL de LiteLLM [http://lllm.cpd.local:4000/v1]: " "http://lllm.cpd.local:4000/v1" LITELLM_BASE_URL
-  LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://lllm.cpd.local:4000/v1}"
+  read_tty "Base URL de LiteLLM [https://lllm.cpd.local/v1]: " "https://lllm.cpd.local/v1" LITELLM_BASE_URL
+  LITELLM_BASE_URL="${LITELLM_BASE_URL:-https://lllm.cpd.local/v1}"
   parse_base_url "$LITELLM_BASE_URL"
 
   RESOLVED_IP="$(resolve_host_ip "$LITELLM_HOST")"
