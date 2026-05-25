@@ -126,8 +126,37 @@ check_cpu() {
   fi
 
   case "$cpu" in
-    x86_64|amd64|aarch64|arm64)
+    x86_64|amd64)
       echo "[OK] CPU compatible: $cpu"
+
+      # Verificar flags de CPU recomendadas por opencode/Node.js
+      local cpu_flags=""
+      if [[ -r /proc/cpuinfo ]]; then
+        cpu_flags="$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null || true)"
+      fi
+
+      local missing_flags=""
+      if [[ "$cpu_flags" != *avx2* ]]; then
+        missing_flags="${missing_flags}avx2 "
+      fi
+      if [[ "$cpu_flags" != *sse4_2* ]]; then
+        missing_flags="${missing_flags}sse4_2 "
+      fi
+      if [[ "$cpu_flags" != *sse4_1* ]]; then
+        missing_flags="${missing_flags}sse4_1 "
+      fi
+
+      if [[ -n "$missing_flags" ]]; then
+        echo "[WARN] CPU sin flags recomendadas: $missing_flags"
+        echo "[INFO] opencode puede funcionar más lento o con compatibilidad reducida."
+        echo "[INFO] Para mejor rendimiento, usa una CPU con AVX2 y SSE4.2."
+      else
+        echo "[OK] Flags de CPU óptimos detectados (AVX2, SSE4.2, SSE4.1)."
+      fi
+      ;;
+    aarch64|arm64)
+      echo "[OK] CPU compatible: $cpu"
+      echo "[INFO] Arquitectura ARM64 detectada. Compatibilidad confirmada."
       ;;
     *)
       echo "[ERROR] Arquitectura no soportada para este instalador: $cpu"
