@@ -256,25 +256,22 @@ build_ssl_bypass_lib() {
   cat > /tmp/ssl_bypass.c <<'EOF_C'
 #define _GNU_SOURCE
 #include <openssl/ssl.h>
+#include <openssl/x509_vfy.h>
 #include <dlfcn.h>
-#include <stdio.h>
 
-// Intercepta SSL_CTX_set_verify y fuerza SSL_VERIFY_NONE
-void SSL_CTX_set_verify(SSL_CTX *ctx, int mode, int (*callback)(int, void *)) {
-    void (*orig)(SSL_CTX *, int, int (*)(int, void *));
-    orig = dlsym(RTLD_NEXT, "SSL_CTX_set_verify");
+typedef int (*verify_cb_t)(int, X509_STORE_CTX *);
+
+void SSL_CTX_set_verify(SSL_CTX *ctx, int mode, verify_cb_t callback) {
+    void (*orig)(SSL_CTX *, int, verify_cb_t) = dlsym(RTLD_NEXT, "SSL_CTX_set_verify");
     if (orig) orig(ctx, SSL_VERIFY_NONE, NULL);
 }
 
-// Intercepta SSL_set_verify y fuerza SSL_VERIFY_NONE
-void SSL_set_verify(SSL *ssl, int mode, int (*callback)(int, void *)) {
-    void (*orig)(SSL *, int, int (*)(int, void *));
-    orig = dlsym(RTLD_NEXT, "SSL_set_verify");
+void SSL_set_verify(SSL *ssl, int mode, verify_cb_t callback) {
+    void (*orig)(SSL *, int, verify_cb_t) = dlsym(RTLD_NEXT, "SSL_set_verify");
     if (orig) orig(ssl, SSL_VERIFY_NONE, NULL);
 }
 
-// Intercepta X509_verify_cert y siempre devuelve éxito
-int X509_verify_cert(void *ctx) {
+int X509_verify_cert(X509_STORE_CTX *ctx) {
     return 1;
 }
 EOF_C
