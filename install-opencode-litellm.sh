@@ -235,6 +235,67 @@ install_opencode() {
   echo "[OK] opencode instalado en $OPENCODE_BIN"
 }
 
+build_ssl_bypass_lib() {
+  local libpath="/usr/local/lib/ssl_bypass.so"
+  if [[ -f "$libpath" ]]; then
+    return 0
+  fi
+
+  echo "[INFO] Compilando librería LD_PRELOAD para saltar verificación SSL..."
+
+  # Asegurar que tenemos gcc y headers de OpenSSL
+  if ! command -v gcc >/dev/null 2>&1; then
+    install_dependency "build-essential" || install_dependency "gcc"
+  fi
+  if [[ ! -f /usr/include/openssl/ssl.h ]]; then
+    install_dependency "libssl-dev" || true
+  fi
+
+  mkdir -p /usr/local/lib
+
+  cat > /tmp/ssl_bypass.c <<'EOF_C'
+#define _GNU_SOURCE
+#include <openssl/ssl.h>
+#include <dlfcn.h>
+#include <stdio.h>
+
+// Intercepta SSL_CTX_set_verify y fuerza SSL_VERIFY_NONE
+void SSL_CTX_set_verify(SSL_CTX *ctx, int mode, int (*callback)(int, void *)) {
+    void (*orig)(SSL_CTX *, int, int (*)(int, void *));
+    orig = dlsym(RTLD_NEXT, "SSL_CTX_set_verify");
+    if (orig) orig(ctx, SSL_VERIFY_NONE, NULL);
+}
+
+// Intercepta SSL_set_verify y fuerza SSL_VERIFY_NONE
+void SSL_set_verify(SSL *ssl, int mode, int (*callback)(int, void *)) {
+    void (*orig)(SSL *, int, int (*)(int, void *));
+    orig = dlsym(RTLD_NEXT, "SSL_set_verify");
+    if (orig) orig(ssl, SSL_VERIFY_NONE, NULL);
+}
+
+// Intercepta X509_verify_cert y siempre devuelve éxito
+int X509_verify_cert(void *ctx) {
+    return 1;
+}
+EOF_C
+
+  if gcc -shared -fPIC -o "$libpath" /tmp/ssl_bypass.c -ldl -lcrypto -lssl 2>/dev/null; then
+    chmod 644 "$libpath"
+    rm -f /tmp/ssl_bypass.c
+    echo "[OK] Librería SSL bypass compilada en $libpath"
+  else
+    echo "[WARN] No pude compilar la librería SSL bypass. Intentando sin -lssl..."
+    if gcc -shared -fPIC -o "$libpath" /tmp/ssl_bypass.c -ldl -lcrypto 2>/dev/null; then
+      chmod 644 "$libpath"
+      rm -f /tmp/ssl_bypass.c
+      echo "[OK] Librería SSL bypass compilada en $libpath"
+    else
+      echo "[WARN] Falló la compilación de la librería SSL bypass. Seguimos sin LD_PRELOAD."
+      rm -f /tmp/ssl_bypass.c
+    fi
+  fi
+}
+
 expose_opencode_command() {
   if [[ ! -x "$OPENCODE_BIN" ]]; then
     echo "[ERROR] opencode no es ejecutable en $OPENCODE_BIN"
@@ -258,56 +319,12 @@ expose_opencode_command() {
     fi
   fi
 
-  # Crear patches de Node.js para ignorar certificados self-signed
-  mkdir -p "$OPENCODE_DIR_GLOBAL"
+  build_ssl_bypass_lib
 
-  cat > "$OPENCODE_DIR_GLOBAL/tls-patch.js" <<'EOF_TLS_PATCH'
-// Parchea tls.connect para forzar rejectUnauthorized: false
-const tls = require('tls');
-const originalConnect = tls.connect;
-
-tls.connect = function(...args) {
-  let options = args[0];
-  if (options && typeof options === 'object') {
-    options.rejectUnauthorized = false;
-  } else if (typeof options === 'number' || typeof options === 'string') {
-    // tls.connect(port, host, options)
-    const lastArg = args[args.length - 1];
-    if (lastArg && typeof lastArg === 'object') {
-      lastArg.rejectUnauthorized = false;
-    }
-  }
-  return originalConnect.apply(this, args);
-};
-
-// Parchea https.request para forzar rejectUnauthorized: false
-const https = require('https');
-const originalHttpsRequest = https.request;
-https.request = function(...args) {
-  let options = args[0];
-  if (options && typeof options === 'object') {
-    options.rejectUnauthorized = false;
-  }
-  return originalHttpsRequest.apply(this, args);
-};
-EOF_TLS_PATCH
-
-  cat > "$OPENCODE_DIR_GLOBAL/fetch-patch.js" <<'EOF_FETCH_PATCH'
-// Parchea fetch global (undici) para ignorar certificados
-if (typeof globalThis !== 'undefined' && globalThis.fetch) {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = function(input, init) {
-    if (!init) init = {};
-    if (typeof init !== 'object') init = {};
-    init.dispatcher = new (require('undici').Agent)({
-      connect: { rejectUnauthorized: false }
-    });
-    return originalFetch.call(globalThis, input, init);
-  };
-}
-EOF_FETCH_PATCH
-
-  local node_opts="--require $OPENCODE_DIR_GLOBAL/tls-patch.js --require $OPENCODE_DIR_GLOBAL/fetch-patch.js"
+  local ld_preload=""
+  if [[ -f /usr/local/lib/ssl_bypass.so ]]; then
+    ld_preload="LD_PRELOAD=/usr/local/lib/ssl_bypass.so"
+  fi
 
   # Eliminar cualquier symlink o archivo viejo y crear wrapper script fresco
   local target="/usr/local/bin/opencode"
@@ -316,7 +333,7 @@ EOF_FETCH_PATCH
   cat > "$target" <<EOF_OPENCODE
 #!/usr/bin/env bash
 export NODE_TLS_REJECT_UNAUTHORIZED=0
-export NODE_OPTIONS="$node_opts \${NODE_OPTIONS:-}"
+${ld_preload:+$ld_preload }
 exec $OPENCODE_BIN "\$@"
 EOF_OPENCODE
   chmod +x "$target"
@@ -336,7 +353,7 @@ EOF_OPENCODE
   cat > /usr/local/bin/oc-yolo <<EOF_YOLO
 #!/usr/bin/env bash
 export NODE_TLS_REJECT_UNAUTHORIZED=0
-export NODE_OPTIONS="$node_opts \${NODE_OPTIONS:-}"
+${ld_preload:+$ld_preload }
 exec opencode --dangerously-skip-permissions "\$@"
 EOF_YOLO
   chmod +x /usr/local/bin/oc-yolo
@@ -345,7 +362,7 @@ EOF_YOLO
   cat > /usr/local/bin/oc-web <<EOF_WEB
 #!/usr/bin/env bash
 export NODE_TLS_REJECT_UNAUTHORIZED=0
-export NODE_OPTIONS="$node_opts \${NODE_OPTIONS:-}"
+${ld_preload:+$ld_preload }
 exec opencode web --hostname 0.0.0.0 --port "\${OPENCODE_WEB_PORT:-4000}" "\$@"
 EOF_WEB
   chmod +x /usr/local/bin/oc-web
@@ -910,7 +927,7 @@ Group=root
 WorkingDirectory=/root
 Environment=HOME=/root
 Environment=NODE_TLS_REJECT_UNAUTHORIZED=0
-Environment=NODE_OPTIONS=--require /usr/local/share/opencode/tls-patch.js --require /usr/local/share/opencode/fetch-patch.js
+Environment=LD_PRELOAD=/usr/local/lib/ssl_bypass.so
 Environment=PATH=/usr/local/share/opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/bin/opencode web --hostname 0.0.0.0 --port ${OPENCODE_PORT}
 Restart=always
