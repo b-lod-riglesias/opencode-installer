@@ -886,7 +886,10 @@ main() {
   rm -f "$TMP_JSON"
 
   MODELS_JSON="$(printf '%s\n' "$MODEL_IDS_RAW" | jq -Rsc 'split("\n") | map(select(length>0)) | map({(.): {name: .}}) | add')"
-  DEFAULT_MODEL="$(printf '%s\n' "$MODEL_IDS_RAW" | head -n 1)"
+
+  # Intentar elegir un modelo multimodal como default
+  DEFAULT_MODEL="$(printf '%s\n' "$MODEL_IDS_RAW" | grep -m1 -E 'gpt-5\.[4-9]|gpt-4|claude|gemini|qwen.*vl|vision|multimodal|gpt-image' || printf '%s\n' "$MODEL_IDS_RAW" | head -n 1)"
+  DEFAULT_MODEL="${DEFAULT_MODEL:-$(printf '%s\n' "$MODEL_IDS_RAW" | head -n 1)}"
 
   echo "[OK] Conexión correcta. Modelos detectados:"
   printf '%s\n' "$MODEL_IDS_RAW" | sed 's/^/  - /'
