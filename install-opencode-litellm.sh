@@ -887,8 +887,14 @@ main() {
 
   MODELS_JSON="$(printf '%s\n' "$MODEL_IDS_RAW" | jq -Rsc 'split("\n") | map(select(length>0)) | map({(.): {name: .}}) | add')"
 
-  # Intentar elegir un modelo multimodal como default
-  DEFAULT_MODEL="$(printf '%s\n' "$MODEL_IDS_RAW" | grep -m1 -E 'gpt-5\.[4-9]|gpt-4|claude|gemini|qwen.*vl|vision|multimodal|gpt-image' || printf '%s\n' "$MODEL_IDS_RAW" | head -n 1)"
+  # Intentar elegir un modelo multimodal como default (qwen primero, luego gpt, claude, gemini)
+  DEFAULT_MODEL="$(printf '%s\n' "$MODEL_IDS_RAW" | grep -m1 -E 'qwen3\.[6-9]|qwen3\.5:cloud|qwen3-next|qwen3-coder|qwen2\.5vl' || true)"
+  if [[ -z "$DEFAULT_MODEL" ]]; then
+    DEFAULT_MODEL="$(printf '%s\n' "$MODEL_IDS_RAW" | grep -m1 -E 'gpt-5\.[4-9]|gpt-4|claude|gemini|qwen.*vl|vision|multimodal|gpt-image' || true)"
+  fi
+  if [[ -z "$DEFAULT_MODEL" ]]; then
+    DEFAULT_MODEL="$(printf '%s\n' "$MODEL_IDS_RAW" | grep -m1 -iE 'coder|cloud|large|pro|flash' || true)"
+  fi
   DEFAULT_MODEL="${DEFAULT_MODEL:-$(printf '%s\n' "$MODEL_IDS_RAW" | head -n 1)}"
 
   echo "[OK] Conexión correcta. Modelos detectados:"
