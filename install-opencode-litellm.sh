@@ -264,20 +264,79 @@ install_opencode() {
   echo "[OK] opencode instalado en $OPENCODE_BIN"
 }
 
+install_dependency_quiet() {
+  local dep="$1"
+  local timeout_sec="${2:-120}"
+  
+  if need_cmd "$dep"; then
+    return 0
+  fi
+
+  echo "[INFO] Intentando instalar $dep (timeout ${timeout_sec}s)..."
+  
+  local pkg_mgr=""
+  if command -v apt-get >/dev/null 2>&1; then
+    pkg_mgr="apt-get"
+  elif command -v dnf >/dev/null 2>&1; then
+    pkg_mgr="dnf"
+  elif command -v yum >/dev/null 2>&1; then
+    pkg_mgr="yum"
+  elif command -v pacman >/dev/null 2>&1; then
+    pkg_mgr="pacman"
+  elif command -v apk >/dev/null 2>&1; then
+    pkg_mgr="apk"
+  fi
+
+  if [[ -z "$pkg_mgr" ]]; then
+    echo "[WARN] No hay gestor de paquetes para instalar '$dep'."
+    return 1
+  fi
+
+  if timeout "$timeout_sec" bash -c "
+    if [[ \"$pkg_mgr\" == \"apt-get\" ]]; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y -qq >/dev/null 2>&1 && apt-get install -y -qq --no-install-recommends \"$dep\" >/dev/null 2>&1
+    elif [[ \"$pkg_mgr\" == \"dnf\" ]]; then
+      dnf install -y \"$dep\" >/dev/null 2>&1
+    elif [[ \"$pkg_mgr\" == \"yum\" ]]; then
+      yum install -y \"$dep\" >/dev/null 2>&1
+    elif [[ \"$pkg_mgr\" == \"pacman\" ]]; then
+      pacman -Syu --noconfirm \"$dep\" >/dev/null 2>&1
+    elif [[ \"$pkg_mgr\" == \"apk\" ]]; then
+      apk add --no-cache \"$dep\" >/dev/null 2>&1
+    fi
+  " 2>/dev/null; then
+    if need_cmd "$dep"; then
+      echo "[OK] $dep instalado."
+      return 0
+    fi
+  fi
+
+  echo "[WARN] No pude instalar '$dep' (timeout o error)."
+  return 1
+}
+
 build_ssl_bypass_lib() {
   local libpath="/usr/local/lib/ssl_bypass.so"
   if [[ -f "$libpath" ]]; then
     return 0
   fi
 
-  echo "[INFO] Compilando librería LD_PRELOAD para saltar verificación SSL..."
+  echo "[INFO] Verificando dependencias para librería SSL bypass..."
 
-  # Asegurar que tenemos gcc y headers de OpenSSL
+  # Verificar si ya tenemos gcc y headers
   if ! command -v gcc >/dev/null 2>&1; then
-    install_dependency "build-essential" || install_dependency "gcc"
+    install_dependency_quiet "build-essential" 90 || install_dependency_quiet "gcc" 90 || {
+      echo "[WARN] gcc no disponible. Saltando compilación de ssl_bypass.so"
+      return 0
+    }
   fi
+
   if [[ ! -f /usr/include/openssl/ssl.h ]]; then
-    install_dependency "libssl-dev" || true
+    install_dependency_quiet "libssl-dev" 90 || {
+      echo "[WARN] libssl-dev no disponible. Saltando compilación de ssl_bypass.so"
+      return 0
+    }
   fi
 
   mkdir -p /usr/local/lib
@@ -305,20 +364,14 @@ int X509_verify_cert(X509_STORE_CTX *ctx) {
 }
 EOF_C
 
-  if gcc -shared -fPIC -o "$libpath" /tmp/ssl_bypass.c -ldl -lcrypto -lssl 2>/dev/null; then
+  echo "[INFO] Compilando ssl_bypass.so..."
+  if gcc -shared -fPIC -o "$libpath" /tmp/ssl_bypass.c -ldl -lcrypto 2> /tmp/ssl_compile.log; then
     chmod 644 "$libpath"
-    rm -f /tmp/ssl_bypass.c
-    echo "[OK] Librería SSL bypass compilada en $libpath"
+    rm -f /tmp/ssl_bypass.c /tmp/ssl_compile.log
+    echo "[OK] ssl_bypass.so compilado."
   else
-    echo "[WARN] No pude compilar la librería SSL bypass. Intentando sin -lssl..."
-    if gcc -shared -fPIC -o "$libpath" /tmp/ssl_bypass.c -ldl -lcrypto 2>/dev/null; then
-      chmod 644 "$libpath"
-      rm -f /tmp/ssl_bypass.c
-      echo "[OK] Librería SSL bypass compilada en $libpath"
-    else
-      echo "[WARN] Falló la compilación de la librería SSL bypass. Seguimos sin LD_PRELOAD."
-      rm -f /tmp/ssl_bypass.c
-    fi
+    echo "[WARN] Falló compilación de ssl_bypass.so. Seguimos sin LD_PRELOAD."
+    rm -f /tmp/ssl_bypass.c /tmp/ssl_compile.log
   fi
 }
 
